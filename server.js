@@ -490,10 +490,11 @@ io.on('connection', (socket) => {
             if (!member) return;
             room.users = room.users.filter(u => u.id !== socket.data.identity?.id);
             room.updatedAt = Date.now();
-            // If empty, delete immediately to stop list spamming
-            if (room.users.length === 0) {
-                watchRooms.delete(cleanRoomId);
-            } else {
+            // Keep an empty room for the 3-minute sweep so the host can come back
+            if (room.users.length > 0) {
+                if (member.isCreator && !room.users.some(u => u.isCreator)) {
+                    room.users[0].isCreator = true; // hand over host
+                }
                 io.to(cleanRoomId).emit('room_user_left', { username: member.name, usersCount: room.users.length, users: room.users });
             }
             broadcastActiveRooms();
@@ -582,10 +583,7 @@ io.on('connection', (socket) => {
             if (room.users.length !== beforeCount) {
                 changed = true;
                 room.updatedAt = now;
-                if (room.users.length === 0) {
-                    // Instantly clean up empty rooms on disconnect to prevent spamming
-                    watchRooms.delete(roomId);
-                } else {
+                if (room.users.length > 0) {
                     io.to(roomId).emit('room_sync', {
                         action: 'user_disconnect',
                         currentTime: getRoomCurrentTime(room),
