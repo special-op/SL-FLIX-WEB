@@ -4,18 +4,12 @@ import { ApiService } from '../services/api';
 import { MovieResult, VideoSource, Subtitle, Season } from '../types';
 import VideoPlayer from './VideoPlayer';
 
-declare const io: any;
-
 const getSocketInstance = () => {
     try {
-        if (typeof socketIoClient === 'function') {
-            return socketIoClient();
-        }
-    } catch (e) {}
-    if (typeof io !== 'undefined') {
-        return io();
+        return socketIoClient();
+    } catch (e) {
+        return null;
     }
-    return null;
 };
 
 interface WatchRoom {
@@ -30,6 +24,7 @@ interface WatchRoom {
     paused: boolean;
     messages?: { id?: string; username: string; message: string; timestamp: number }[];
     kickedUsers?: string[];
+    pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
 }
 
 export const WatchPartyView: React.FC<{
@@ -47,6 +42,8 @@ export const WatchPartyView: React.FC<{
     const [inStreamLatestChat, setInStreamLatestChat] = useState<{ username: string; message: string } | null>(null);
     const [pauseNotice, setPauseNotice] = useState<string | null>(null);
     const [inviteCopied, setInviteCopied] = useState(false);
+    const [joinRequestState, setJoinRequestState] = useState<'idle' | 'pending' | 'denied'>('idle');
+    const [joinRequests, setJoinRequests] = useState<{ requestId: string; username: string; requestedAt: number }[]>([]);
     const [roomSyncTimestamp, setRoomSyncTimestamp] = useState<number>(Date.now());
     const chatBottomRef = useRef<HTMLDivElement>(null);
     
@@ -109,6 +106,8 @@ export const WatchPartyView: React.FC<{
 
         s.on('room_state', (room: WatchRoom) => {
             setCurrentRoom(room);
+            setJoinRequestState('idle');
+            if (room.pendingRequests) setJoinRequests(room.pendingRequests);
             setRoomSyncTimestamp(Date.now());
             
             // Restore persistent messages merged with server state
@@ -139,6 +138,16 @@ export const WatchPartyView: React.FC<{
                 if (room.currentSeason) setSelectedSeason(room.currentSeason);
                 if (room.currentEpisode) setSelectedEpisode(room.currentEpisode);
             }
+        });
+
+        s.on('room_request_pending', () => setJoinRequestState('pending'));
+        s.on('room_request_denied', (data: { message?: string }) => {
+            setJoinRequestState('denied');
+            setPauseNotice(data.message || 'The host did not approve your request.');
+        });
+        s.on('room_join_request', (request: { requestId: string; username: string; requestedAt: number }) => {
+            setJoinRequests(prev => prev.some(item => item.requestId === request.requestId) ? prev : [...prev, request]);
+            setPauseNotice(`${request.username} wants to join your room`);
         });
 
         s.on('room_user_joined', (data: { username: string; usersCount: number; users?: any[] }) => {
@@ -250,11 +259,12 @@ export const WatchPartyView: React.FC<{
 
         const params = new URLSearchParams(window.location.search);
         const roomParam = params.get('room');
+        const requestParam = params.get('request') === '1';
         if (roomParam) {
             setTimeout(() => {
                 const storedName = localStorage.getItem('slflix_username') || username;
                 const cleanParam = roomParam.trim().toUpperCase();
-                s.emit('join_room', { roomId: cleanParam, username: storedName });
+                s.emit('join_room', { roomId: cleanParam, username: storedName, request: requestParam });
             }, 600);
         }
 
@@ -413,6 +423,33 @@ export const WatchPartyView: React.FC<{
         window.history.pushState({}, '', `/watch-party?room=${roomId}`);
     };
 
+    const handleJoinRequestDecision = (requestId: string, decision: 'approve' | 'deny') => {
+        if (!socket || !currentRoom) return;
+        socket.emit('room_join_request_decision', { roomId: currentRoom.roomId, requestId, decision });
+        setJoinRequests(prev => prev.filter(request => request.requestId !== requestId));
+    };
+
+    const handleShareInvite = async () => {
+        if (!currentRoom) return;
+        const inviteUrl = `${window.location.origin}/watch-party?room=${currentRoom.roomId}&request=1`;
+        const shareData = {
+            title: `Join ${currentRoom.roomName} on SLFLIX`,
+            text: `Request to join my watch room with code ${currentRoom.roomId}.`,
+            url: inviteUrl
+        };
+        try {
+            if (navigator.share) {
+                await navigator.share(shareData);
+            } else {
+                await navigator.clipboard.writeText(`${shareData.text}\n${inviteUrl}`);
+            }
+            setInviteCopied(true);
+            window.setTimeout(() => setInviteCopied(false), 2000);
+        } catch {
+            // Sharing can be cancelled by the user; do not show an error for that.
+        }
+    };
+
     const handleJoinRoom = (roomId: string) => {
         if (!socket) return;
         if (!socket.connected) {
@@ -422,6 +459,15 @@ export const WatchPartyView: React.FC<{
         localStorage.setItem('slflix_username', username);
         socket.emit('join_room', { roomId: cleanId, username });
         window.history.pushState({}, '', `/watch-party?room=${cleanId}`);
+    };
+
+    const handleRequestRoom = (roomId: string) => {
+        if (!socket) return;
+        const cleanId = String(roomId || '').trim().toUpperCase();
+        localStorage.setItem('slflix_username', username);
+        setJoinRequestState('pending');
+        socket.emit('join_room', { roomId: cleanId, username, request: true });
+        window.history.pushState({}, '', `/watch-party?room=${cleanId}&request=1`);
     };
 
     const handleKickUser = (targetUsername: string) => {
@@ -508,7 +554,7 @@ export const WatchPartyView: React.FC<{
 
     return (
         <div className="min-h-screen bg-[#07080d] text-white pt-20 pb-20 px-4 sm:px-8">
-            <div className="max-w-7xl mx-auto">
+                 <div className="max-w-7xl mx-auto">
                 {/* Header Navigation */}
                 <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-6">
                     <div>
@@ -518,9 +564,16 @@ export const WatchPartyView: React.FC<{
                         <h1 className="text-2xl sm:text-3xl font-black bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-500 bg-clip-text text-transparent flex items-center gap-3">
                             <i className="fa-solid fa-users-viewfinder text-cyan-400"></i> Watch Party Cinema
                         </h1>
-                        <p className="text-gray-400 text-xs mt-0.5">Real-time synchronized video streaming, host master controls, live chat, and viewer metrics.</p>
-                    </div>
-                </div>
+                         <p className="text-gray-400 text-xs mt-0.5">Real-time synchronized video streaming, host master controls, live chat, and viewer metrics.</p>
+                     </div>
+                 </div>
+
+                 {joinRequestState !== 'idle' && !currentRoom && (
+                     <div className={`mb-6 rounded-2xl border px-4 py-3 text-sm flex items-center gap-3 ${joinRequestState === 'denied' ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100'}`} role="status" aria-live="polite">
+                         <i className={`fa-solid ${joinRequestState === 'pending' ? 'fa-hourglass-half' : 'fa-circle-exclamation'}`}></i>
+                         <span>{joinRequestState === 'pending' ? 'Join request sent. Keep this page open while the host approves you.' : 'Your request was not approved. You can try another room.'}</span>
+                     </div>
+                 )}
 
                 {/* ROOM NOT JOINED YET: CREATE OR JOIN ACTIVE ROOM */}
                 {!currentRoom ? (
@@ -664,11 +717,11 @@ export const WatchPartyView: React.FC<{
                                                 )}
                                             </div>
                                             <div className="flex items-center gap-2">
-                                                <button 
-                                                    onClick={() => handleJoinRoom(room.roomId)}
+                                                 <button 
+                                                     onClick={() => handleRequestRoom(room.roomId)}
                                                     className="flex-1 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
                                                 >
-                                                    <i className="fa-solid fa-play"></i> Join & Watch Party
+                                                     <i className="fa-solid fa-paper-plane"></i> Request to Join
                                                 </button>
                                                 {(room.creator === username || room.creator === localStorage.getItem('slflix_username')) && (
                                                     <button
@@ -884,18 +937,47 @@ export const WatchPartyView: React.FC<{
                                         )}
                                     </div>
 
-                                    {/* Copy Invite Link */}
-                                    <button 
-                                        onClick={() => {
-                                            navigator.clipboard.writeText(`${window.location.origin}/watch-party?room=${currentRoom.roomId}`);
-                                            setInviteCopied(true);
-                                            setTimeout(() => setInviteCopied(false), 2000);
-                                        }}
-                                        className="px-3.5 py-2 bg-cyan-500/10 hover:bg-cyan-500 hover:text-black text-cyan-400 border border-cyan-500/30 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
-                                    >
-                                        <i className="fa-solid fa-link"></i>
-                                        <span>{inviteCopied ? 'Copied!' : 'Invite'}</span>
-                                    </button>
+                                     {/* Share invite link and six-character room code */}
+                                     <button 
+                                         onClick={handleShareInvite}
+                                         className="px-3.5 py-2 bg-cyan-500/10 hover:bg-cyan-500 hover:text-black text-cyan-400 border border-cyan-500/30 font-bold text-xs rounded-xl transition-all flex items-center gap-1.5 cursor-pointer"
+                                         title={`Share invite link or code ${currentRoom.roomId}`}
+                                     >
+                                         <i className="fa-solid fa-share-nodes"></i>
+                                         <span>{inviteCopied ? 'Copied!' : 'Invite'}</span>
+                                     </button>
+                                     <button
+                                         onClick={async () => {
+                                             try { await navigator.clipboard.writeText(currentRoom.roomId); setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 2000); } catch {}
+                                         }}
+                                         className="px-3.5 py-2 bg-white/5 hover:bg-white/15 text-gray-200 border border-white/10 font-mono font-bold text-xs rounded-xl transition-all cursor-pointer"
+                                         title="Copy room code"
+                                         aria-label={`Copy room code ${currentRoom.roomId}`}
+                                     >
+                                         #{currentRoom.roomId}
+                                     </button>
+
+                                     {isCreator && joinRequests.length > 0 && (
+                                         <div className="relative">
+                                             <span className="absolute -top-2 -right-2 min-w-5 h-5 px-1 rounded-full bg-pink-500 text-[10px] font-black text-white flex items-center justify-center">{joinRequests.length}</span>
+                                             <details className="relative">
+                                                 <summary className="list-none px-3.5 py-2 bg-pink-500/10 hover:bg-pink-500 hover:text-black text-pink-300 border border-pink-500/30 font-bold text-xs rounded-xl cursor-pointer flex items-center gap-1.5">
+                                                     <i className="fa-solid fa-user-clock"></i> Requests
+                                                 </summary>
+                                                 <div className="absolute right-0 top-full mt-2 z-50 w-64 bg-[#121324] border border-white/15 rounded-2xl p-2 shadow-2xl space-y-2">
+                                                     {joinRequests.map(request => (
+                                                         <div key={request.requestId} className="bg-white/5 rounded-xl p-2.5 flex items-center justify-between gap-2">
+                                                             <span className="text-xs font-bold text-white truncate">{request.username}</span>
+                                                             <div className="flex gap-1">
+                                                                 <button aria-label={`Approve ${request.username}`} title="Approve" onClick={() => handleJoinRequestDecision(request.requestId, 'approve')} className="w-8 h-8 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500 hover:text-black"><i className="fa-solid fa-check"></i></button>
+                                                                 <button aria-label={`Deny ${request.username}`} title="Deny" onClick={() => handleJoinRequestDecision(request.requestId, 'deny')} className="w-8 h-8 rounded-lg bg-red-500/20 text-red-300 hover:bg-red-500 hover:text-white"><i className="fa-solid fa-xmark"></i></button>
+                                                             </div>
+                                                         </div>
+                                                     ))}
+                                                 </div>
+                                             </details>
+                                         </div>
+                                     )}
 
                                     {/* Leave Room */}
                                     <button 

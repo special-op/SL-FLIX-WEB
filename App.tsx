@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, Suspense, Component, ErrorInfo } from 'react';
+import { io } from 'socket.io-client';
 import { LazyLoadImage } from 'react-lazy-load-image-component';
 import 'react-lazy-load-image-component/src/effects/blur.css';
 import { ApiService, RANKING_CATEGORIES } from './services/api';
@@ -29,7 +30,6 @@ import { useHomeData } from './hooks/useHomeData';
 import { useMovieDetails } from './hooks/useMovieDetails';
 import { getOptimizedImageUrl, DEFAULT_FAVICON_FALLBACK } from './utils/image';
 
-declare const io: any;
 import { 
   StarIcon, PlayIcon, PlusIcon, ShareIcon, BackIcon,
   ChevronRightIcon, CalendarIcon, TagIcon, HeartIcon, FilmIcon, TvIcon, 
@@ -133,7 +133,7 @@ const SourceSelector: React.FC<{
                         <h3 className="text-2xl font-black text-white tracking-tight">Watch Options</h3>
                         <p className="text-gray-500 text-xs mt-1 uppercase tracking-widest font-bold">Choose Quality</p>
                     </div>
-                    <button onClick={onClose} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all">
+                    <button onClick={onClose} aria-label="Close" title="Close" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-400 hover:text-white hover:bg-white/10 transition-all">
                         <i className="fa-solid fa-times"></i>
                     </button>
                 </div>
@@ -285,7 +285,7 @@ const ToplistView: React.FC<{ initialCategory?: string; onMovieClick: (m: MovieR
             <div className="w-full md:w-64 flex-shrink-0 md:border-r border-white/10 pr-0 md:pr-4 mb-4 md:mb-0">
                 <div className="sticky top-20">
                     <div className="flex items-center gap-2 mb-4 px-4 md:px-0">
-                        <button onClick={onBack} className="md:hidden text-gray-400 hover:text-white"><i className="fa-solid fa-arrow-left text-xl"></i></button>
+                        <button onClick={onBack} aria-label="Go back" title="Go back" className="md:hidden text-gray-400 hover:text-white"><i className="fa-solid fa-arrow-left text-xl"></i></button>
                         <h2 className="text-xl font-bold text-white flex items-center gap-2"><i className="fa-solid fa-chart-line text-primary"></i> Top List</h2>
                     </div>
                     <div className="space-y-1 overflow-x-auto md:overflow-visible pb-2 md:pb-0">
@@ -398,7 +398,7 @@ const Navbar: React.FC<{
                 </div>
                 <div className="flex items-center gap-2">
                     <PWAInstallButton />
-                    <button onClick={() => setIsSearchOpen(true)} className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-300 hover:text-primary transition-colors"><i className="fa-solid fa-search"></i></button>
+                    <button onClick={() => setIsSearchOpen(true)} aria-label="Search" title="Search" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-300 hover:text-primary transition-colors"><i className="fa-solid fa-search"></i></button>
                 </div>
             </nav>
             {isSearchOpen && (
@@ -518,7 +518,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                 {/* Hero Backdrop & Poster Skeleton */}
                 <div className="relative h-[40vh] md:h-[60vh] overflow-hidden">
                     <div className="absolute top-4 left-4 z-20">
-                        <button onClick={onBack} className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors">
+                        <button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors">
                             <BackIcon className="w-5 h-5" />
                         </button>
                     </div>
@@ -617,7 +617,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                 </div>
             )}
             <div className="relative h-[40vh] md:h-[60vh]">
-                <div className="absolute top-4 left-4 z-20"><button onClick={onBack} className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-5 h-5" /></button></div>
+                <div className="absolute top-4 left-4 z-20"><button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-5 h-5" /></button></div>
                 <div className="absolute inset-0 bg-cover bg-center transition-all duration-700" style={{ backgroundImage: `url(${getOptimizedImageUrl(movie.cover || movie.thumbnail, 1280)})` }}></div>
                 <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/40 to-transparent"></div>
                 <div className="absolute bottom-0 left-0 w-full p-[4%] flex flex-col md:flex-row items-end gap-6">
@@ -817,7 +817,7 @@ const TelegramModal: React.FC<{ isOpen: boolean; onClose: () => void }> = ({ isO
                 <div className="absolute -top-24 -right-24 w-48 h-48 bg-primary/20 rounded-full blur-3xl pointer-events-none"></div>
                 <div className="absolute -bottom-24 -left-24 w-48 h-48 bg-blue-500/20 rounded-full blur-3xl pointer-events-none"></div>
                 
-                <button onClick={onClose} className="absolute top-5 right-5 w-10 h-10 rounded-full bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white flex items-center justify-center transition-all border border-white/5 cursor-pointer">
+                <button onClick={onClose} aria-label="Close" title="Close" className="absolute top-5 right-5 w-10 h-10 rounded-full bg-white/5 hover:bg-white/10 text-gray-400 hover:text-white flex items-center justify-center transition-all border border-white/5 cursor-pointer">
                     <i className="fa-solid fa-times text-lg"></i>
                 </button>
 
@@ -956,8 +956,7 @@ const App: React.FC = () => {
     const [activeRooms, setActiveRooms] = useState<any[]>([]);
 
     useEffect(() => {
-        const s = typeof io !== 'undefined' ? io() : null;
-        if (!s) return;
+        const s = io();
         s.emit('get_active_rooms');
         s.on('active_rooms_list', (rooms: any[]) => setActiveRooms(rooms || []));
         return () => { s.disconnect(); };

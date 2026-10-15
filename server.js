@@ -40,7 +40,9 @@ const io = new Server(httpServer, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    maxHttpBufferSize: 64 * 1024,
+    perMessageDeflate: false
 });
 const visitorData = {
     totalVisitors: 0,
@@ -123,10 +125,10 @@ function getActiveRoomsList() {
     return Array.from(watchRooms.values())
         // Prevent spam: only list rooms with active viewers or created less than 2 minutes ago
         .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < 2 * 60 * 1000))
-        .map(r => ({
-            ...r,
-            currentTime: getRoomCurrentTime(r)
-        }));
+        .map(r => {
+            const { pendingRequests, ...publicRoom } = r;
+            return { ...publicRoom, currentTime: getRoomCurrentTime(r) };
+        });
 }
 
 function broadcastActiveRooms() {
@@ -150,7 +152,47 @@ setInterval(() => {
     }
 }, 30 * 1000);
 
+const SOCKET_EVENT_LIMIT = 60;
+const SOCKET_EVENT_WINDOW_MS = 60 * 1000;
+const ROOM_ID_PATTERN = /^[A-Z0-9_-]{1,64}$/;
+const USERNAME_MAX_LENGTH = 40;
+const ROOM_NAME_MAX_LENGTH = 120;
+const MESSAGE_MAX_LENGTH = 1000;
+const MAX_PENDING_ROOM_REQUESTS = 50;
+
+function cleanText(value, maxLength, fallback = '') {
+    if (typeof value !== 'string') return fallback;
+    return value.trim().slice(0, maxLength);
+}
+
+function cleanRoomIdValue(value) {
+    const roomId = cleanText(value, 64).toUpperCase();
+    return ROOM_ID_PATTERN.test(roomId) ? roomId : '';
+}
+
+function validRoomPayload(payload) {
+    return payload !== null && typeof payload === 'object' && !Array.isArray(payload);
+}
+
+function isRoomMember(room, socket) {
+    return room?.users?.find(user => user.id === socket.data.identity?.id) || null;
+}
+
+function isSocketRateLimited(socket) {
+    const now = Date.now();
+    const timestamps = (socket.data.eventTimestamps || []).filter(time => now - time < SOCKET_EVENT_WINDOW_MS);
+    timestamps.push(now);
+    socket.data.eventTimestamps = timestamps;
+    return timestamps.length > SOCKET_EVENT_LIMIT;
+}
+
 io.on('connection', (socket) => {
+    socket.data.identity = Object.freeze({ id: socket.id });
+    socket.data.eventTimestamps = [];
+    socket.use((packet, next) => {
+        if (isSocketRateLimited(socket)) return next(new Error('Too many watch-party requests'));
+        next();
+    });
     visitorData.onlineUsers++;
     io.emit('visitorUpdate', {
         onlineUsers: visitorData.onlineUsers,
@@ -162,20 +204,27 @@ io.on('connection', (socket) => {
         socket.emit('active_rooms_list', getActiveRoomsList());
     });
 
-    socket.on('create_room', ({ roomId, roomName, username, movie, season, episode }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
+    socket.on('create_room', (payload) => {
+        if (!validRoomPayload(payload)) return socket.emit('error_message', { message: 'Invalid room request.' });
+        const { roomId, roomName, username, movie, season, episode } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
+        const cleanUsername = cleanText(username, USERNAME_MAX_LENGTH);
+        if (!cleanRoomId || !cleanUsername || watchRooms.has(cleanRoomId)) {
+            return socket.emit('error_message', { message: 'Invalid or unavailable room.' });
+        }
         socket.join(cleanRoomId);
         const now = Date.now();
         const room = {
             roomId: cleanRoomId,
-            roomName: roomName || `Room ${cleanRoomId}`,
-            creator: username,
-            movie: movie || null,
-            currentSeason: season || 1,
-            currentEpisode: episode || 1,
-            users: [{ id: socket.id, name: username, isCreator: true }],
+            roomName: cleanText(roomName, ROOM_NAME_MAX_LENGTH, `Room ${cleanRoomId}`),
+            creator: cleanUsername,
+            movie: movie && typeof movie === 'object' ? movie : null,
+            currentSeason: Number.isInteger(Number(season)) && Number(season) >= 1 ? Number(season) : 1,
+            currentEpisode: Number.isInteger(Number(episode)) && Number(episode) >= 1 ? Number(episode) : 1,
+            users: [{ id: socket.id, name: cleanUsername, isCreator: true }],
             messages: [],
             kickedUsers: [],
+            pendingRequests: [],
             currentTime: 0,
             paused: false, // Starts playing continuous real-time movie stream
             updatedAt: now
@@ -185,9 +234,12 @@ io.on('connection', (socket) => {
         socket.emit('room_state', room);
     });
 
-    socket.on('join_room', ({ roomId, username }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
-        const cleanUsername = String(username || '').trim();
+    socket.on('join_room', (payload) => {
+        if (!validRoomPayload(payload)) return socket.emit('error_message', { message: 'Invalid join request.' });
+        const { roomId, username } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
+        const cleanUsername = cleanText(username, USERNAME_MAX_LENGTH);
+        if (!cleanRoomId || !cleanUsername) return socket.emit('error_message', { message: 'Invalid room or username.' });
         const room = watchRooms.get(cleanRoomId);
         if (room) {
             // Check if user is in the kicked/banned list for this room session
@@ -197,6 +249,35 @@ io.on('connection', (socket) => {
                     message: 'You were kicked from this Watch Party and cannot rejoin.' 
                 });
                 return;
+            }
+
+            if (payload.request === true) {
+                if (room.users.some(user => user.name.toLowerCase() === cleanUsername.toLowerCase())) {
+                    return socket.emit('room_state', room);
+                }
+                room.pendingRequests = Array.isArray(room.pendingRequests) ? room.pendingRequests : [];
+                const existingRequest = room.pendingRequests.find(request => request.socketId === socket.id);
+                if (!existingRequest && room.pendingRequests.length < MAX_PENDING_ROOM_REQUESTS) {
+                    const request = {
+                        requestId: `${socket.id}:${Date.now()}`,
+                        socketId: socket.id,
+                        username: cleanUsername,
+                        requestedAt: Date.now()
+                    };
+                    room.pendingRequests.push(request);
+                    room.updatedAt = Date.now();
+                    const hostSocketId = room.users.find(user => user.isCreator)?.id;
+                    if (hostSocketId) io.to(hostSocketId).emit('room_join_request', {
+                        roomId: cleanRoomId,
+                        requestId: request.requestId,
+                        username: request.username,
+                        requestedAt: request.requestedAt
+                    });
+                }
+                return socket.emit('room_request_pending', {
+                    roomId: cleanRoomId,
+                    message: 'Your request was sent to the room host.'
+                });
             }
 
             socket.join(cleanRoomId);
@@ -224,20 +305,46 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('room_join_request_decision', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const host = isRoomMember(room, socket);
+        if (!room || !host?.isCreator) return socket.emit('error_message', { message: 'Only the room host can approve entry.' });
+        room.pendingRequests = Array.isArray(room.pendingRequests) ? room.pendingRequests : [];
+        const requestIndex = room.pendingRequests.findIndex(request => request.requestId === payload.requestId);
+        if (requestIndex < 0) return;
+        const [request] = room.pendingRequests.splice(requestIndex, 1);
+        const targetSocket = io.sockets.sockets.get(request.socketId);
+        const approved = payload.decision === 'approve';
+        if (!approved) {
+            targetSocket?.emit('room_request_denied', { roomId, message: 'The host did not approve your request.' });
+            return;
+        }
+        if (!targetSocket) return;
+        targetSocket.join(roomId);
+        room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+        room.updatedAt = Date.now();
+        targetSocket.emit('room_state', { ...room, currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
+        io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
+        broadcastActiveRooms();
+    });
+
     // Creator / Host can remove a participant from the room; once kicked, the user cannot rejoin the session
-    socket.on('kick_user', ({ roomId, targetUsername, creatorUsername }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
+    socket.on('kick_user', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const { roomId, targetUsername } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
         const room = watchRooms.get(cleanRoomId);
         if (!room) return;
 
-        const isHost = room.creator.toLowerCase() === String(creatorUsername || '').trim().toLowerCase() ||
-                       room.users.some(u => u.id === socket.id && u.isCreator);
+        const isHost = Boolean(isRoomMember(room, socket)?.isCreator);
         if (!isHost) {
             socket.emit('error_message', { message: 'Only the Watch Party host can remove participants.' });
             return;
         }
 
-        const normTarget = String(targetUsername || '').trim();
+        const normTarget = cleanText(targetUsername, USERNAME_MAX_LENGTH);
         if (normTarget.toLowerCase() === room.creator.toLowerCase()) {
             socket.emit('error_message', { message: 'The party host cannot be removed.' });
             return;
@@ -294,17 +401,19 @@ io.on('connection', (socket) => {
     });
 
     // Creator / Host can permanently kill the party so it never shows again
-    socket.on('kill_room', ({ roomId, username }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
+    socket.on('kill_room', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const { roomId } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
         const room = watchRooms.get(cleanRoomId);
         if (room) {
-            // Verify host identity or fallback to creator match
-            const isHost = room.creator === username || room.users.some(u => u.id === socket.id && u.isCreator);
-            if (isHost || room.users.length <= 1) {
+            const member = isRoomMember(room, socket);
+            const isHost = Boolean(member?.isCreator);
+            if (isHost) {
                 io.to(cleanRoomId).emit('room_ended', { 
                     roomId: cleanRoomId,
-                    message: `Watch party "${room.roomName}" was closed by the host (${username}).`,
-                    endedBy: username
+                    message: `Watch party "${room.roomName}" was closed by the host (${member.name}).`,
+                    endedBy: member.name
                 });
                 io.in(cleanRoomId).socketsLeave(cleanRoomId);
                 watchRooms.delete(cleanRoomId);
@@ -315,63 +424,71 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('leave_room', ({ roomId, username }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
+    socket.on('leave_room', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const { roomId } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
         socket.leave(cleanRoomId);
         const room = watchRooms.get(cleanRoomId);
         if (room) {
-            room.users = room.users.filter(u => u.id !== socket.id && u.name !== username);
+            const member = isRoomMember(room, socket);
+            if (!member) return;
+            room.users = room.users.filter(u => u.id !== socket.data.identity?.id);
             room.updatedAt = Date.now();
             // If empty, delete immediately to stop list spamming
             if (room.users.length === 0) {
                 watchRooms.delete(cleanRoomId);
             } else {
-                io.to(cleanRoomId).emit('room_user_left', { username, usersCount: room.users.length, users: room.users });
+                io.to(cleanRoomId).emit('room_user_left', { username: member.name, usersCount: room.users.length, users: room.users });
             }
             broadcastActiveRooms();
         }
     });
 
-    socket.on('room_action', ({ roomId, action, currentTime, paused, movie, season, episode, username }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
-        socket.join(cleanRoomId);
+    socket.on('room_action', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const { roomId, action, currentTime, paused, movie, season, episode } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
         const room = watchRooms.get(cleanRoomId);
-        if (room) {
+        const member = isRoomMember(room, socket);
+        if (room && member?.isCreator) {
             const now = Date.now();
-            if (currentTime !== undefined) {
-                room.currentTime = currentTime;
+            if (currentTime !== undefined && Number.isFinite(Number(currentTime)) && Number(currentTime) >= 0 && Number(currentTime) <= 86400) {
+                room.currentTime = Number(currentTime);
             } else if (!room.paused) {
                 room.currentTime = getRoomCurrentTime(room);
             }
-            if (paused !== undefined) {
+            if (paused !== undefined && typeof paused === 'boolean') {
                 room.paused = paused;
             }
-            if (movie) room.movie = movie;
-            if (season !== undefined) room.currentSeason = season;
-            if (episode !== undefined) room.currentEpisode = episode;
+            if (typeof movie === 'string') room.movie = movie.slice(0, 500);
+            if (season !== undefined && Number.isInteger(Number(season)) && Number(season) >= 1 && Number(season) <= 1000) room.currentSeason = Number(season);
+            if (episode !== undefined && Number.isInteger(Number(episode)) && Number(episode) >= 1 && Number(episode) <= 10000) room.currentEpisode = Number(episode);
             room.updatedAt = now;
 
             io.to(cleanRoomId).emit('room_sync', { 
-                action, 
+                action: cleanText(action, 32, 'sync'),
                 currentTime: room.currentTime, 
                 paused: room.paused, 
                 movie: room.movie, 
                 season: room.currentSeason,
                 episode: room.currentEpisode,
-                username 
+                username: member.name
             });
             broadcastActiveRooms();
         }
     });
 
-    socket.on('room_chat', ({ roomId, username, message }) => {
-        const cleanRoomId = String(roomId || '').trim().toUpperCase();
-        const cleanUsername = String(username || 'Viewer').trim();
-        const text = String(message || '').trim();
-        if (!text) return;
-        
-        socket.join(cleanRoomId);
+    socket.on('room_chat', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const { roomId, message } = payload;
+        const cleanRoomId = cleanRoomIdValue(roomId);
+        const text = cleanText(message, MESSAGE_MAX_LENGTH);
         const room = watchRooms.get(cleanRoomId);
+        const member = isRoomMember(room, socket);
+        if (!text || !member) return;
+        const cleanUsername = member.name;
+        socket.join(cleanRoomId);
 
         if (room && room.kickedUsers && room.kickedUsers.some(k => k.toLowerCase() === cleanUsername.toLowerCase())) {
             socket.emit('room_kicked', { 
@@ -404,8 +521,9 @@ io.on('connection', (socket) => {
         const now = Date.now();
         let changed = false;
         for (const [roomId, room] of watchRooms.entries()) {
+            room.pendingRequests = (room.pendingRequests || []).filter(request => request.socketId !== socket.id);
             const beforeCount = room.users.length;
-            room.users = room.users.filter(u => u.id !== socket.id);
+            room.users = room.users.filter(u => u.id !== socket.data.identity?.id);
             if (room.users.length !== beforeCount) {
                 changed = true;
                 room.updatedAt = now;
@@ -441,6 +559,12 @@ app.use((req, res, next) => {
     trackVisitor(clientIP, req.path);
     next();
 });
+app.get('/healthz', (req, res) => {
+    res.status(200).json({ status: 'ok', service: 'sl-flix-pro' });
+});
+app.get('/readyz', (req, res) => {
+    res.status(200).json({ status: 'ready' });
+});
 app.use(compression({
     level: 6,
     threshold: 1024,
@@ -462,7 +586,26 @@ app.use((req, res, next) => {
 });
 app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', [
+        "default-src 'self'",
+        "base-uri 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'self'",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline' https:",
+        "font-src 'self' data: https:",
+        "img-src 'self' data: blob: https:",
+        "media-src 'self' blob: data: https:",
+        "connect-src 'self' blob: https: wss: ws:",
+        "frame-src 'self' https:"
+    ].join('; '));
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     next();
 });
 function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {}) {
@@ -1046,14 +1189,6 @@ app.get('/sitemap.xml', async (req, res) => {
     sitemapCache.set(baseUrl, { xml: sitemap, expiresAt: Date.now() + 15 * 60 * 1000 });
     res.send(sitemap);
 });
-app.get('/api/visitors', (req, res) => {
-    res.json({
-        onlineUsers: visitorData.onlineUsers,
-        todayVisitors: visitorData.todayVisitors,
-        totalVisitors: visitorData.totalVisitors,
-        pageViews: visitorData.pageViews
-    });
-});
 app.get('/_i18n/:lang/messages.json', (req, res) => {
     const lang = req.params.lang || 'en';
     const messagesPath = path.join(__dirname, 'public', '_i18n', lang, 'messages.json');
@@ -1070,11 +1205,6 @@ app.get('/manifest.webmanifest', (req, res) => {
     } else {
         res.json({ name: 'SLFLIX' });
     }
-});
-app.post('/api/event', express.json(), (req, res) => {
-    const { type, data } = req.body;
-    io.emit('event', { type, data, timestamp: Date.now() });
-    res.json({ success: true });
 });
 app.get('/api/domain', (req, res) => {
     res.json({ domain: req.get('host') || 'localhost:3001' });

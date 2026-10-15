@@ -7,12 +7,13 @@
     "dev": "node server.js",
     "build": "vite build",
     "lint": "tsc --noEmit",
+    "test": "node --test audit.test.mjs && npm run lint && npm run build",
     "preview": "vite preview",
     "start": "node server.js",
     "server": "node server.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "20.19.x"
   },
   "dependencies": {
     "@paper-design/shaders": "^0.0.80",
@@ -41,6 +42,7 @@
     "tslint": "^5.20.1"
   },
   "devDependencies": {
+    "@types/node": "^20.19.0",
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.2.0",

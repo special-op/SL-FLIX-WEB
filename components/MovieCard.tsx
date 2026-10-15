@@ -21,9 +21,11 @@ const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, progress }) => {
     const ratingNum = rating ? parseFloat(rating) : 0;
     const showRating = ratingNum > 0;
     return (
-        <div 
+        <button
+            type="button"
             onClick={() => onClick(movie)}
-            className="w-full cursor-pointer relative transition-all duration-300 hover:scale-[1.02] hover:z-10 group flex flex-col h-full"
+            aria-label={`Open ${movie.title}`}
+            className="w-full cursor-pointer relative transition-all duration-300 hover:scale-[1.02] hover:z-10 group flex flex-col h-full text-left bg-transparent border-0 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0a]"
         >
             <div className="w-full aspect-[2/3] rounded-xl overflow-hidden border border-white/5 transition-all duration-300 group-hover:border-primary group-hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] group-hover:shadow-primary/20 relative bg-[#111]">
                 <LazyLoadImage 
@@ -70,7 +72,7 @@ const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, progress }) => {
                      {movie.genre && <span className="truncate">{movie.genre.split(',')[0]}</span>}
                  </div>
             </div>
-        </div>
+        </button>
     );
 };
 export default MovieCard;

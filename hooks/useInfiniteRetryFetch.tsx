@@ -3,11 +3,12 @@ interface RetryOptions {
   initialDelay?: number;
   maxDelay?: number;
   backoffMultiplier?: number;
+  maxRetries?: number;
 }
 interface UseInfiniteRetryResult<T> {
   data: T | null;
   loading: boolean;
-  error: null;
+  error: Error | null;
   retry: () => void;
   isRetrying: boolean;
 }
@@ -24,7 +25,8 @@ export function useInfiniteRetryFetch<T>(
   const {
     initialDelay = 4000,
     maxDelay = 30000,
-    backoffMultiplier = 1.5
+    backoffMultiplier = 1.5,
+    maxRetries = 5
   } = options;
   const [state, setState] = useState<FetchState<T>>({
     data: null,
@@ -59,21 +61,30 @@ export function useInfiniteRetryFetch<T>(
       });
     } catch (error) {
       if (!mountedRef.current) return;
+      const normalizedError = error instanceof Error ? error : new Error(String(error));
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        setState(prev => ({ ...prev, loading: false, lastError: normalizedError }));
+        return;
+      }
+      if (retryCount >= maxRetries) {
+        setState(prev => ({ ...prev, loading: false, retryCount, lastError: normalizedError }));
+        return;
+      }
       const delay = Math.min(
         initialDelay * Math.pow(backoffMultiplier, retryCount),
         maxDelay
-      );
+      ) * (0.8 + Math.random() * 0.4);
       console.log(`[InfiniteRetry] Attempt ${retryCount + 1} failed. Retrying in ${delay}ms...`, error);
       setState(prev => ({
         ...prev,
         retryCount: retryCount + 1,
-        lastError: error as Error
+        lastError: normalizedError
       }));
       timeoutRef.current = setTimeout(() => {
         executeFetch(retryCount + 1);
       }, delay);
     }
-  }, [initialDelay, maxDelay, backoffMultiplier]);
+  }, [initialDelay, maxDelay, backoffMultiplier, maxRetries]);
   useEffect(() => {
     executeFetch(0);
   }, []);
@@ -91,9 +102,9 @@ export function useInfiniteRetryFetch<T>(
   return {
     data: state.data,
     loading: state.loading,
-    error: null,
+    error: state.lastError,
     retry,
-    isRetrying: state.retryCount > 0
+    isRetrying: state.loading && state.retryCount > 0
   };
 }
 export async function fetchWithInfiniteRetry<T>(
@@ -104,10 +115,11 @@ export async function fetchWithInfiniteRetry<T>(
   const {
     initialDelay = 4000,
     maxDelay = 30000,
-    backoffMultiplier = 1.5
+    backoffMultiplier = 1.5,
+    maxRetries = 5
   } = retryOptions;
   let retryCount = 0;
-  while (true) {
+  while (retryCount <= maxRetries) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
@@ -129,11 +141,13 @@ export async function fetchWithInfiniteRetry<T>(
         initialDelay * Math.pow(backoffMultiplier, retryCount),
         maxDelay
       );
+      if (retryCount >= maxRetries) throw error;
       console.log(`[fetchWithInfiniteRetry] Attempt ${retryCount + 1} failed. Retrying in ${delay}ms...`, error);
       retryCount++;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
+  throw new Error('Retry limit exceeded');
 }
 export function useOfflineStatus() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -169,4 +183,4 @@ export const OfflineBanner: React.FC = () => {
     </div>
   );
 };
-export default useInfiniteRetryFetch;
+export default useInfiniteRetryFetch;

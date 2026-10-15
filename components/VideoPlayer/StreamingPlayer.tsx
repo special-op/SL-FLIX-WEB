@@ -987,8 +987,7 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
               textShadow: getCaptionTextShadowCss(captionSettings.textShadow),
               fontSize: subtitleFontSize === 'small' ? '0.95rem' : subtitleFontSize === 'large' ? '1.45rem' : '1.2rem'
             }}
-            dangerouslySetInnerHTML={{ __html: activeSubtitleCue }}
-          />
+          >{activeSubtitleCue}</span>
         </div>
       )}
 

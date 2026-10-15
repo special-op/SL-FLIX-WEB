@@ -628,14 +628,14 @@ const NewsView: React.FC<NewsViewProps> = ({ onPlayMatch, onPlayHighlight }) => 
                                     exit={{ scale: 0.95, y: 20, opacity: 0 }}
                                     transition={{ type: "spring", damping: 25, stiffness: 350 }}
                                     className="bg-[#0c0c16] border border-white/10 rounded-3xl overflow-hidden w-full max-w-2xl shadow-[0_30px_70px_rgba(0,0,0,0.8)] relative max-h-[85vh] flex flex-col"
-                                    onClick={(e) => e.stopPropagation()}
+                                    onClick={(e: React.MouseEvent<HTMLDivElement>) => e.stopPropagation()}
                                 >
                                     {}
                                     <button 
                                         onClick={() => setSelectedNews(null)}
                                         className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full bg-black/60 border border-white/10 text-white flex items-center justify-center hover:bg-primary hover:text-black transition-all group"
                                     >
-                                        <i className="fa-solid fa-xmark text-lg group-hover:scale-110"></i>
+                                        <i className="fa-solid fa-xmark text-lg group-hover:scale-110" aria-hidden="true"></i>
                                     </button>
                                     {}
                                     <div className="relative aspect-video overflow-hidden flex-shrink-0">

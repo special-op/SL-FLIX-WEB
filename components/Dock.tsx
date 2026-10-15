@@ -93,7 +93,7 @@ function Dock({
       className='mx-auto flex max-w-full items-end overflow-x-auto px-2 pb-1 justify-center'
     >
       <motion.div
-        onMouseMove={({ pageX }) => {
+        onMouseMove={({ pageX }: React.MouseEvent<HTMLDivElement>) => {
           isHovered.set(1);
           mouseX.set(pageX);
         }}
@@ -120,7 +120,7 @@ function DockItem({ children, className, onClick }: DockItemProps) {
   const ref = useRef<HTMLDivElement>(null);
   const { distance, magnification, mouseX, spring } = useDock();
   const isHovered = useMotionValue(0);
-  const mouseDistance = useTransform(mouseX, (val) => {
+  const mouseDistance = useTransform(mouseX, (val: number) => {
     const domRect = ref.current?.getBoundingClientRect() ?? { x: 0, width: 0 };
     return val - domRect.x - domRect.width / 2;
   });
@@ -139,9 +139,15 @@ function DockItem({ children, className, onClick }: DockItemProps) {
       onFocus={() => isHovered.set(1)}
       onBlur={() => isHovered.set(0)}
       onClick={onClick}
-      onTouchEnd={(e) => {
+      onTouchEnd={(e: React.TouchEvent<HTMLDivElement>) => {
         e.preventDefault();
         onClick?.();
+      }}
+      onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick?.();
+        }
       }}
       className={cn(
         'relative inline-flex items-center justify-center cursor-pointer touch-manipulation select-none py-1',
@@ -163,7 +169,7 @@ function DockLabel({ children, className, ...rest }: DockLabelProps) {
   const [isVisible, setIsVisible] = useState(false);
   useEffect(() => {
     if (!isHovered) return;
-    const unsubscribe = isHovered.on('change', (latest) => {
+    const unsubscribe = isHovered.on('change', (latest: number) => {
       setIsVisible(latest === 1);
     });
     return () => unsubscribe();
@@ -192,7 +198,7 @@ function DockLabel({ children, className, ...rest }: DockLabelProps) {
 function DockIcon({ children, className, ...rest }: DockIconProps) {
   const restProps = rest as Record<string, unknown>;
   const width = restProps['width'] as MotionValue<number>;
-  const widthTransform = useTransform(width || useMotionValue(40), (val) => val / 2);
+  const widthTransform = useTransform(width || useMotionValue(40), (val: number) => val / 2);
   return (
     <motion.div
       style={{ width: widthTransform }}

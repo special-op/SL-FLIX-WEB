@@ -95,6 +95,10 @@ export const AnimeThreeCanvas: React.FC<AnimeThreeCanvasProps> = ({
 
     let mouseX = 0;
     let mouseY = 0;
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let isPageVisible = document.visibilityState === 'visible';
+    let animationFrameId: number | null = null;
+    let clock = new THREE.Clock();
     const onMouseMove = (e: MouseEvent) => {
       const windowHalfX = window.innerWidth / 2;
       const windowHalfY = window.innerHeight / 2;
@@ -103,27 +107,46 @@ export const AnimeThreeCanvas: React.FC<AnimeThreeCanvasProps> = ({
     };
     window.addEventListener('mousemove', onMouseMove);
 
-    let animationFrameId: number;
-    let clock = new THREE.Clock();
-
-    const animate = () => {
-      animationFrameId = requestAnimationFrame(animate);
-      const elapsedTime = clock.getElapsedTime();
-
+    const renderFrame = (elapsedTime: number) => {
       particles.rotation.y = elapsedTime * 0.08 + mouseX;
       particles.rotation.x = elapsedTime * 0.04 + mouseY;
-
       ring.rotation.x = elapsedTime * 0.2;
       ring.rotation.y = elapsedTime * 0.3;
       ring.scale.setScalar(1 + Math.sin(elapsedTime * 1.5) * 0.05);
-
       ring2.rotation.x = -elapsedTime * 0.15;
       ring2.rotation.z = elapsedTime * 0.25;
-
       renderer.render(scene, camera);
     };
 
+    const animate = () => {
+      if (!isPageVisible) return;
+      renderFrame(prefersReducedMotion.matches ? 0 : clock.getElapsedTime());
+      if (!prefersReducedMotion.matches) animationFrameId = requestAnimationFrame(animate);
+    };
+
     animate();
+    const handleVisibilityChange = () => {
+      isPageVisible = document.visibilityState === 'visible';
+      if (!isPageVisible && animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+      } else if (isPageVisible && !prefersReducedMotion.matches) {
+        clock = new THREE.Clock();
+        animate();
+      } else if (isPageVisible) renderFrame(0);
+    };
+    const handleMotionPreference = () => {
+      if (prefersReducedMotion.matches) {
+        if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+        animationFrameId = null;
+        renderFrame(0);
+      } else if (isPageVisible && animationFrameId === null) {
+        clock = new THREE.Clock();
+        animate();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    prefersReducedMotion.addEventListener?.('change', handleMotionPreference);
 
     const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -139,7 +162,9 @@ export const AnimeThreeCanvas: React.FC<AnimeThreeCanvasProps> = ({
 
     return () => {
       window.removeEventListener('mousemove', onMouseMove);
-      cancelAnimationFrame(animationFrameId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      prefersReducedMotion.removeEventListener?.('change', handleMotionPreference);
+      if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
       resizeObserver.disconnect();
       geometry.dispose();
       material.dispose();

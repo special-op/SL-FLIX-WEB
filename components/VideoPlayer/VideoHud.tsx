@@ -302,13 +302,13 @@ export const VideoHud: React.FC<VideoHudProps> = ({
           )}
           <div className="flex justify-between items-center text-white text-xs">
             <div className="flex items-center gap-3">
-              <button onClick={onTogglePlay} className="hover:text-primary transition-colors cursor-pointer">
+              <button onClick={onTogglePlay} aria-label={playing ? "Pause" : "Play"} title={playing ? "Pause" : "Play"} className="hover:text-primary transition-colors cursor-pointer">
                 <i className={`fa-solid ${playing ? 'fa-pause' : 'fa-play'}`}></i>
               </button>
               {!isLive && (
                 <>
-                  <button onClick={() => onSkip(-10)} className="hover:text-primary transition-colors cursor-pointer" title="Rewind 10s"><i className="fa-solid fa-rotate-left"></i></button>
-                  <button onClick={() => onSkip(10)} className="hover:text-primary transition-colors cursor-pointer" title="Forward 10s"><i className="fa-solid fa-rotate-right"></i></button>
+                  <button onClick={() => onSkip(-10)} aria-label="Rewind 10 seconds" className="hover:text-primary transition-colors cursor-pointer" title="Rewind 10s"><i className="fa-solid fa-rotate-left"></i></button>
+                  <button onClick={() => onSkip(10)} aria-label="Forward 10 seconds" className="hover:text-primary transition-colors cursor-pointer" title="Forward 10s"><i className="fa-solid fa-rotate-right"></i></button>
                   {isRecapActive && onSkipRecap && (
                     <button
                       onClick={onSkipRecap}
@@ -374,7 +374,7 @@ export const VideoHud: React.FC<VideoHudProps> = ({
               </button>
 
               <div className="relative flex items-center gap-2 group/vol">
-                <button onClick={onToggleMute} className="hover:text-primary">
+                <button onClick={onToggleMute} aria-label={isMuted ? "Unmute" : "Mute"} title={isMuted ? "Unmute" : "Mute"} className="hover:text-primary">
                   <i className={`fa-solid ${isMuted ? 'fa-volume-xmark' : volume > 0.5 ? 'fa-volume-high' : 'fa-volume-low'}`}></i>
                 </button>
                 <div className="w-0 overflow-hidden group-hover/vol:w-20 transition-all duration-200">
@@ -402,10 +402,10 @@ export const VideoHud: React.FC<VideoHudProps> = ({
               >
                 <i className="fa-solid fa-mobile-screen-button -rotate-90"></i>
               </button>
-              <button onClick={onToggleFullscreen} className="hover:text-primary" title="Fullscreen (F)">
+              <button onClick={onToggleFullscreen} aria-label="Toggle fullscreen" className="hover:text-primary" title="Fullscreen (F)">
                 <i className="fa-solid fa-expand"></i>
               </button>
-              <button onClick={onTogglePiP} className="hover:text-primary" title="Picture in Picture / Mini Player">
+              <button onClick={onTogglePiP} aria-label="Toggle picture in picture" className="hover:text-primary" title="Picture in Picture / Mini Player">
                 <i className="fa-solid fa-clone"></i>
               </button>
             </div>

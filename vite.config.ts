@@ -1,5 +1,9 @@
 import { defineConfig, type UserConfig, type PluginOption } from 'vite';
 import react from '@vitejs/plugin-react';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig(async ({ mode, command }): Promise<UserConfig> => {
   const isProduction = mode === 'production';
@@ -110,6 +114,15 @@ export default defineConfig(async ({ mode, command }): Promise<UserConfig> => {
         }
       })] : [])
     ],
+    resolve: {
+      // The published ESM files in the current motion packages are incomplete
+      // in some npm mirrors. Use their shipped CommonJS entrypoints so clean
+      // installs remain buildable without changing the animation API.
+      alias: {
+        'framer-motion': path.join(projectRoot, 'node_modules/framer-motion/dist/cjs/index.js'),
+        'motion/react': path.join(projectRoot, 'node_modules/motion/dist/cjs/react.js'),
+      },
+    },
     build: {
       outDir: 'dist',
       sourcemap: false,

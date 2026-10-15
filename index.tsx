@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import './styles.css';
 import App, { ErrorBoundary } from './App';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
