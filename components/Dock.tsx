@@ -90,7 +90,7 @@ function Dock({
         height: height,
         scrollbarWidth: 'none',
       }}
-      className='mx-auto flex max-w-full items-end overflow-x-auto px-2 pb-1 justify-center'
+      className='dock-safe-area mx-auto flex max-w-full items-end overflow-x-auto px-2 pb-1 justify-center'
     >
       <motion.div
         onMouseMove={({ pageX }: React.MouseEvent<HTMLDivElement>) => {
@@ -150,7 +150,7 @@ function DockItem({ children, className, onClick }: DockItemProps) {
         }
       }}
       className={cn(
-        'relative inline-flex items-center justify-center cursor-pointer touch-manipulation select-none py-1',
+        'relative inline-flex min-w-[44px] min-h-[44px] items-center justify-center cursor-pointer touch-manipulation select-none py-1',
         className
       )}
       tabIndex={0}
@@ -183,7 +183,7 @@ function DockLabel({ children, className, ...rest }: DockLabelProps) {
           exit={{ opacity: 0, y: 0 }}
           transition={{ duration: 0.2 }}
           className={cn(
-            'absolute -top-6 left-1/2 w-fit whitespace-pre rounded-md border border-white/20 bg-[#222] px-2 py-0.5 text-xs text-white z-50 pointer-events-none shadow-xl',
+            'dock-label absolute -top-8 left-1/2 w-fit whitespace-pre rounded-md border border-white/20 bg-[#222] px-2 py-0.5 text-xs text-white z-50 pointer-events-none shadow-xl',
             className
           )}
           role='tooltip'
@@ -202,7 +202,7 @@ function DockIcon({ children, className, ...rest }: DockIconProps) {
   return (
     <motion.div
       style={{ width: widthTransform }}
-      className={cn('flex items-center justify-center text-white', className)}
+      className={cn('flex min-h-[44px] shrink-0 items-center justify-center text-white', className)}
     >
       {children}
     </motion.div>

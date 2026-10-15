@@ -62,6 +62,7 @@ interface VideoHudProps {
   onSkipRecap?: () => void;
   isRecapActive?: boolean;
   isIntroActive?: boolean;
+  mobileScale?: number;
 }
 
 export const VideoHud: React.FC<VideoHudProps> = ({
@@ -122,6 +123,7 @@ export const VideoHud: React.FC<VideoHudProps> = ({
   onSkipRecap,
   isRecapActive = false,
   isIntroActive = false,
+  mobileScale = 1,
 }) => {
   const validDuration = typeof duration === 'number' && !isNaN(duration) && isFinite(duration) && duration > 0 ? duration : 0;
   const validCurrentTime = typeof currentTime === 'number' && !isNaN(currentTime) && isFinite(currentTime) && currentTime >= 0 ? currentTime : 0;
@@ -131,8 +133,14 @@ export const VideoHud: React.FC<VideoHudProps> = ({
   const playedPercent = validDuration > 0 ? Math.min(Math.max((validCurrentTime / validDuration) * 100, 0), 100) : 0;
 
   return (
-    <div 
+    <div
       className={`absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-black/80 transition-opacity flex flex-col justify-between z-30 ${showControls && !locked ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}
+      style={mobileScale < 1 ? {
+        width: `${100 / mobileScale}%`,
+        height: `${100 / mobileScale}%`,
+        transform: `scale(${mobileScale})`,
+        transformOrigin: 'bottom center'
+      } : undefined}
       onMouseEnter={() => { isHoveringControlsRef.current = true; }}
       onMouseLeave={() => { isHoveringControlsRef.current = false; }}
     >

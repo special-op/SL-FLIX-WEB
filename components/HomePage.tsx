@@ -4,9 +4,12 @@ import { ApiService } from '../services/api';
 import MovieCard from './MovieCard';
 import Loader from './Loader';
 import { ChevronRightIcon } from './Icons';
-import { getOptimizedImageUrl, DEFAULT_FAVICON_FALLBACK } from '../utils/image';
+import { getOptimizedImageUrl } from '../utils/image';
+
+const IMAGE_FALLBACK = '/icons/slflix.png';
+const prefersReducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const HeroSkeleton = () => (
-  <div className="h-[50vh] md:h-[70vh] relative flex items-center bg-[#0a0a15]">
+    <div className="min-h-[50vh] md:h-[70vh] relative flex items-center bg-[#0a0a15]">
     <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/30 to-transparent"></div>
     <div className="relative z-10 px-[4%] w-full max-w-4xl mt-20">
       <div className="h-6 w-24 bg-white/10 rounded-full mb-4 animate-pulse"></div>
@@ -33,7 +36,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
   const [currentIndex, setCurrentIndex] = React.useState(0);
   const [isTransitioning, setIsTransitioning] = React.useState(false);
   React.useEffect(() => {
-    if (movies.length <= 1) return;
+    if (movies.length <= 1 || prefersReducedMotion()) return;
     const interval = setInterval(() => {
       setIsTransitioning(true);
       setTimeout(() => { 
@@ -55,7 +58,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
   };
   const rating = m.imdbRating && m.imdbRating !== '0' && m.imdbRating !== 'null' ? m.imdbRating : null;
   return (
-    <div className="h-[75vh] md:h-[80vh] relative flex items-center bg-[#0a0a15] overflow-hidden group mt-16 md:mt-0">
+    <div className="min-h-[75vh] md:h-[80vh] relative flex flex-col bg-[#0a0a15] overflow-hidden group">
       <div className="absolute inset-0">
         {movies.map((movie, idx) => {
           const bgImg = movie.cover || movie.thumbnail || (movie as any).posterUrl;
@@ -63,14 +66,14 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
             <div 
               key={idx} 
               className={`absolute inset-0 bg-cover bg-center transition-all duration-1000 ease-in-out ${idx === currentIndex ? 'opacity-40 scale-100' : 'opacity-0 scale-95'}`} 
-              style={{ backgroundImage: `url(${getOptimizedImageUrl(bgImg, 1200)})`, filter: 'blur(2px)' }} 
+              style={{ backgroundImage: `url(${getOptimizedImageUrl(bgImg, 1200) || IMAGE_FALLBACK})`, filter: 'blur(2px)' }} 
             />
           );
         })}
       </div>
       <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/90 to-transparent"></div>
       <div className="absolute inset-0 bg-gradient-to-r from-[#0a0a15] via-[#0a0a15]/95 to-transparent/30"></div>
-      <div className="relative z-10 px-[4%] md:px-[6%] w-full max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-6 md:gap-16 mt-8 md:mt-0">
+       <div className="relative z-10 flex flex-1 items-center px-[4%] md:px-[6%] py-8 pb-10 md:py-0 md:pb-0 w-full max-w-7xl mx-auto flex-col md:flex-row justify-between gap-6 md:gap-16 mt-8 md:mt-0">
         <div className={`flex-1 transition-all duration-700 w-full ${isTransitioning ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'}`}>
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <span className="text-white font-bold text-[10px] md:text-xs tracking-[0.2em] uppercase px-3 py-1 bg-white/10 backdrop-blur-md rounded-sm border border-white/10">
@@ -93,19 +96,19 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
             </div>
           )}
           <p className="text-gray-300 text-sm sm:text-base md:text-lg mb-8 max-w-2xl line-clamp-2 sm:line-clamp-3 md:line-clamp-4 drop-shadow-lg font-medium leading-relaxed">
-            {m.description || "Watch this and more trending content in ultra high definition. Stream anywhere, anytime on SLFLIX."}
+             {m.description?.trim() || 'Synopsis unavailable for this title.'}
           </p>
           <div className="flex flex-wrap items-center gap-4">
             <button 
               onClick={() => onPlay(m)} 
-              className="bg-primary text-black font-bold text-base md:text-lg py-3 md:py-4 px-8 md:px-10 rounded hover:bg-white transition-all duration-300 flex items-center gap-3 shadow-[0_0_20px_rgba(0,229,255,0.3)] hover:scale-105 hover:shadow-[0_0_30px_rgba(0,229,255,0.5)]"
+              className="touch-target bg-primary text-black font-bold text-base md:text-lg py-3 md:py-4 px-8 md:px-10 rounded hover:bg-white transition-all duration-300 flex items-center gap-3 shadow-[0_0_20px_rgba(0,229,255,0.3)] hover:scale-105 hover:shadow-[0_0_30px_rgba(0,229,255,0.5)]"
             >
               <i className="fa-solid fa-play"></i>
               <span>Play Now</span>
             </button>
             <button 
               onClick={() => onDetails(m)} 
-              className="bg-white/10 hover:bg-white/20 text-white backdrop-blur-md font-bold text-base md:text-lg py-3 md:py-4 px-8 rounded transition-all duration-300 flex items-center gap-3 border border-white/10"
+              className="touch-target bg-white/10 hover:bg-white/20 text-white backdrop-blur-md font-bold text-base md:text-lg py-3 md:py-4 px-8 rounded transition-all duration-300 flex items-center gap-3 border border-white/10"
             >
               <i className="fa-solid fa-circle-info"></i>
               <span>Details</span>
@@ -117,12 +120,16 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
              className="w-full aspect-[2/3] rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.8)] border border-white/10 relative cursor-pointer group"
              onClick={() => onPlay(m)}
            >
-              <img 
-                src={getOptimizedImageUrl(m.cover || m.thumbnail || (m as any).posterUrl, 600)} 
-                onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_FAVICON_FALLBACK; }} 
-                alt={m.title} 
-                className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" 
-              />
+               <img
+                 src={getOptimizedImageUrl(m.cover || m.thumbnail || (m as any).posterUrl, 600) || IMAGE_FALLBACK}
+                 onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }}
+                 alt={m.title}
+                 width={600}
+                 height={900}
+                 loading="lazy"
+                 decoding="async"
+                 className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+               />
               <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors duration-500"></div>
               <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-500">
                   <div className="w-12 sm:w-16 h-12 sm:h-16 rounded-full bg-primary/90 text-black flex items-center justify-center shadow-[0_0_30px_rgba(0,229,255,0.5)] transform scale-50 group-hover:scale-100 transition-transform duration-500 delay-100">
@@ -133,14 +140,14 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
         </div>
       </div>
       {movies.length > 1 && (
-        <div className="absolute bottom-6 left-[4%] md:left-auto right-auto md:right-[6%] z-20 flex items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[92%] md:max-w-[70%] overflow-x-auto scrollbar-hide">
-          {movies.map((movie, idx) => (
-            <button 
-              key={idx} 
-              onClick={() => goToSlide(idx)} 
-              className={`relative w-12 md:w-14 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`} 
-            >
-              <img src={getOptimizedImageUrl(movie.cover || movie.thumbnail || (movie as any).posterUrl, 100)} onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_FAVICON_FALLBACK; }} alt={movie.title} className="w-full h-full object-cover" />
+          <div className="relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[92%] md:max-w-[70%] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mx-0 md:mb-0 md:absolute md:bottom-6 md:right-[6%] md:w-auto">
+           {movies.map((movie, idx) => (
+             <button
+               key={idx}
+               onClick={() => goToSlide(idx)}
+               className={`relative w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
+             >
+               <img src={getOptimizedImageUrl(movie.cover || movie.thumbnail || (movie as any).posterUrl, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={movie.title} width={100} height={150} loading="lazy" decoding="async" className="w-full h-full object-cover" />
               {idx === currentIndex && (
                 <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
                   <div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div>
@@ -216,18 +223,18 @@ const CategoryRow: React.FC<{ data: CategoryData, onMovieClick: (m: MovieResult)
   const scroll = (direction: 'left' | 'right') => {
     if (scrollRef.current) {
       const scrollAmount = direction === 'left' ? -400 : 400;
-      scrollRef.current.scrollBy({ left: scrollAmount, behavior: 'smooth' });
+      scrollRef.current.scrollBy({ left: scrollAmount, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
     }
   };
   React.useEffect(() => {
-    if (isHovered || movies.length <= 4 || movies.length > 15) return;
+    if (isHovered || prefersReducedMotion() || movies.length <= 4 || movies.length > 15) return;
     const interval = setInterval(() => {
       if (scrollRef.current) {
         const { scrollLeft, scrollWidth, clientWidth } = scrollRef.current;
         if (scrollLeft >= scrollWidth - clientWidth - 10) {
-          scrollRef.current.scrollTo({ left: 0, behavior: 'smooth' });
+          scrollRef.current.scrollTo({ left: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
         } else {
-          scrollRef.current.scrollBy({ left: 200, behavior: 'smooth' });
+          scrollRef.current.scrollBy({ left: 200, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
         }
       }
     }, 4000);
@@ -394,14 +401,14 @@ const HomePage: React.FC<{
     );
   }
 
-  return (
-    <div className="pb-24">
+   return (
+    <div className="pb-8 md:pb-0">
       <Suspense fallback={<HeroSkeleton />}>
         <Hero movies={effectiveHeroMovies} onPlay={onMovieClick} onDetails={onMovieClick} />
       </Suspense>
 
       {/* Genre Navigation Bar */}
-      <div ref={genreNavRef} className="sticky top-[58px] z-30 bg-[#0a0a15]/90 backdrop-blur-xl border-y border-white/10 py-3.5 px-[4%] shadow-2xl transition-all">
+      <div ref={genreNavRef} className="sticky top-16 z-30 bg-[#0a0a15]/90 backdrop-blur-xl border-y border-white/10 py-3.5 px-[4%] shadow-2xl transition-all">
         <div className="max-w-7xl mx-auto">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
@@ -411,7 +418,7 @@ const HomePage: React.FC<{
             {selectedGenre !== 'All' && (
               <button
                 onClick={() => setSelectedGenre('All')}
-                className="text-xs text-primary hover:text-white font-bold flex items-center gap-1.5 transition-colors bg-primary/10 hover:bg-primary/20 px-2.5 py-1 rounded-full border border-primary/30"
+                 className="touch-target text-xs text-primary hover:text-white font-bold flex items-center gap-1.5 transition-colors bg-primary/10 hover:bg-primary/20 px-2.5 py-1 rounded-full border border-primary/30"
               >
                 <span>Reset filter</span>
                 <i className="fa-solid fa-xmark text-xs"></i>
@@ -420,7 +427,7 @@ const HomePage: React.FC<{
           </div>
 
           <div className="relative group">
-            <div className="flex items-center gap-2 md:gap-3 overflow-x-auto scrollbar-hide py-1 scroll-smooth">
+             <div className="flex items-center gap-2 md:gap-3 overflow-x-auto scrollbar-hide py-1 scroll-smooth scroll-snap-x">
               {availableGenrePills.map((genre) => {
                 const isActive = selectedGenre.toLowerCase() === genre.id.toLowerCase();
                 return (
@@ -432,10 +439,10 @@ const HomePage: React.FC<{
                         const yOffset = -70;
                         const element = genreNavRef.current;
                         const y = element.getBoundingClientRect().top + window.pageYOffset + yOffset;
-                        window.scrollTo({ top: y, behavior: 'smooth' });
+                        window.scrollTo({ top: y, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
                       }
                     }}
-                    className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs md:text-sm font-bold whitespace-nowrap transition-all duration-300 cursor-pointer flex-shrink-0 ${
+                     className={`touch-target flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs md:text-sm font-bold whitespace-nowrap transition-all duration-300 cursor-pointer flex-shrink-0 scroll-snap-item ${
                       isActive
                         ? 'bg-primary text-black shadow-[0_0_20px_rgba(0,229,255,0.4)] scale-105'
                         : 'bg-white/5 hover:bg-white/15 text-gray-300 border border-white/10 hover:border-white/30 hover:text-white'

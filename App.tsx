@@ -28,7 +28,7 @@ const NovelHubView = React.lazy(() => import('./components/NovelHubView').then(m
 const WatchPartyView = React.lazy(() => import('./components/WatchPartyView').then(m => ({ default: m.WatchPartyView })));
 import { useHomeData } from './hooks/useHomeData';
 import { useMovieDetails } from './hooks/useMovieDetails';
-import { getOptimizedImageUrl, DEFAULT_FAVICON_FALLBACK } from './utils/image';
+import { getOptimizedImageUrl } from './utils/image';
 
 import { 
   StarIcon, PlayIcon, PlusIcon, ShareIcon, BackIcon,
@@ -36,6 +36,8 @@ import {
   GlobeIcon, EpisodeIcon, InfoIcon, YoutubeIcon, CheckIcon, SpinnerIcon, CopyIcon
 } from './components/Icons';
 import { RetroTvError } from './components/RetroTvError';
+
+const IMAGE_FALLBACK = '/icons/slflix.png';
 
 export class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean, error: Error | null }> {
   constructor(props: { children: React.ReactNode }) {
@@ -308,7 +310,7 @@ const ToplistView: React.FC<{ initialCategory?: string; onMovieClick: (m: MovieR
                                     <RankingBadge rank={index + 1} />
                                     <div className="flex-1 min-w-0">
                                         <div className="w-16 h-20 md:w-20 md:h-28 rounded-lg overflow-hidden flex-shrink-0 shadow-lg">
-                                            <LazyLoadImage src={getOptimizedImageUrl(movie.cover, 200)} alt={movie.title} effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_FAVICON_FALLBACK; }} />
+                                            <LazyLoadImage src={getOptimizedImageUrl(movie.cover || movie.thumbnail, 200) || IMAGE_FALLBACK} alt={movie.title} width={200} height={280} loading="lazy" effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} />
                                         </div>
                                         <h4 className="text-white text-xs font-medium mt-2 truncate group-hover:text-primary transition-colors">{movie.title}</h4>
                                         <p className="text-gray-500 text-[10px]">{movie.releaseDate?.split('-')[0]}</p>
@@ -380,25 +382,25 @@ const Navbar: React.FC<{
     };
     return (
         <>
-            <nav className="sticky top-0 z-[100] bg-[#0a0a15]/95 backdrop-blur-md px-[4%] h-16 flex justify-between items-center border-b border-white/5 pt-safe">
-                <div className="flex items-center gap-4">
-                    <button onClick={onHome} className="text-xl font-extrabold text-white flex items-center gap-1 select-none">SL<span className="text-primary">FLIX</span></button>
-                    <button onClick={onToplist} className={`hidden md:flex text-sm font-medium ${currentView === 'toplist' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-chart-line"></i><span>Top List</span></button>
-                    <button onClick={onLiveTv} className={`hidden md:flex text-sm font-medium ${currentView === 'live-tv' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-satellite-dish"></i><span>Live TV</span></button>
-                    <button onClick={onNews} className={`hidden md:flex text-sm font-medium ${currentView === 'news' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-newspaper"></i><span>News</span></button>
-                    <button onClick={onAnime} className={`hidden md:flex text-sm font-medium ${currentView === 'anime' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-tv text-primary"></i><span>Anime</span></button>
-                    <button onClick={onNovels} className={`hidden md:flex text-sm font-medium items-center gap-1.5 ${currentView === 'novels' ? 'text-cyan-400' : 'text-gray-300 hover:text-cyan-400'}`}><i className="fa-solid fa-book-open text-cyan-400"></i><span>Novels</span></button>
-                    <button onClick={onWatchParty} className={`hidden md:flex text-sm font-medium items-center gap-1.5 ${currentView === 'watch-party' ? 'text-purple-400' : 'text-gray-300 hover:text-purple-400'}`}><i className="fa-solid fa-users-viewfinder text-purple-400"></i><span>Watch Party</span></button>
-                    {onAdult && (
-                        <button onClick={onAdult} className={`px-2.5 py-1 rounded-full text-xs font-black uppercase tracking-wider flex items-center gap-1 transition-all ${currentView === 'adult' ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white shadow-lg shadow-fuchsia-600/40' : 'bg-fuchsia-500/10 text-fuchsia-400 hover:bg-fuchsia-500/20 border border-fuchsia-500/30'}`}>
-                            <i className="fa-solid fa-[#18]"></i>
+             <nav className="sticky top-0 z-[100] min-h-16 bg-[#0a0a15]/95 backdrop-blur-md px-[4%] py-2 flex justify-between items-center gap-2 border-b border-white/5 pt-safe">
+                 <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto scrollbar-hide">
+                     <button onClick={onHome} className="touch-target shrink-0 px-2 text-xl font-extrabold text-white flex items-center gap-1 select-none">SL<span className="text-primary">FLIX</span></button>
+                      <button onClick={onToplist} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'toplist' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-chart-line" aria-hidden="true"></i><span>Top List</span></button>
+                      <button onClick={onLiveTv} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'live-tv' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-satellite-dish" aria-hidden="true"></i><span>Live TV</span></button>
+                      <button onClick={onNews} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'news' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-newspaper" aria-hidden="true"></i><span>News</span></button>
+                      <button onClick={onAnime} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'anime' ? 'text-primary' : 'text-gray-300 hover:text-primary'}`}><i className="fa-solid fa-tv text-primary" aria-hidden="true"></i><span>Anime</span></button>
+                      <button onClick={onNovels} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'novels' ? 'text-cyan-400' : 'text-gray-300 hover:text-cyan-400'}`}><i className="fa-solid fa-book-open text-cyan-400" aria-hidden="true"></i><span>Novels</span></button>
+                      <button onClick={onWatchParty} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'watch-party' ? 'text-purple-400' : 'text-gray-300 hover:text-purple-400'}`}><i className="fa-solid fa-users-viewfinder text-purple-400" aria-hidden="true"></i><span>Watch Party</span></button>
+                     {onAdult && (
+                         <button onClick={onAdult} className={`shrink-0 min-h-11 px-2.5 py-1 rounded-full text-xs font-black uppercase tracking-wider flex items-center gap-1 transition-all whitespace-nowrap ${currentView === 'adult' ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white shadow-lg shadow-fuchsia-600/40' : 'bg-fuchsia-500/10 text-fuchsia-400 hover:bg-fuchsia-500/20 border border-fuchsia-500/30'}`}>
+                             <i className="fa-solid fa-shield-cat" aria-hidden="true"></i>
                             <span>+18</span>
                         </button>
                     )}
                 </div>
-                <div className="flex items-center gap-2">
-                    <PWAInstallButton />
-                    <button onClick={() => setIsSearchOpen(true)} aria-label="Search" title="Search" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-300 hover:text-primary transition-colors"><i className="fa-solid fa-search"></i></button>
+                 <div className="flex shrink-0 items-center gap-2">
+                     <PWAInstallButton />
+                     <button onClick={() => setIsSearchOpen(true)} aria-label="Search" title="Search" className="touch-target w-11 h-11 rounded-full bg-white/5 flex items-center justify-center text-gray-300 hover:text-primary transition-colors"><i className="fa-solid fa-search"></i></button>
                 </div>
             </nav>
             {isSearchOpen && (
@@ -450,7 +452,7 @@ const Navbar: React.FC<{
                             <div className="space-y-1">
                                 {suggestions.map(s => (
                                     <div key={s.id} onClick={() => submit(s.l)} className="flex items-center gap-3 p-3 hover:bg-white/10 rounded-lg cursor-pointer transition-colors group">
-                                        <div className="w-10 h-14 bg-white/5 rounded-lg overflow-hidden flex-none">{s.i && <LazyLoadImage src={getOptimizedImageUrl(s.i.imageUrl, 100)} effect="blur" className="w-full h-full object-cover group-hover:scale-110 transition-transform" wrapperClassName="w-full h-full" onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_FAVICON_FALLBACK; }} />}</div>
+                                         <div className="w-10 h-14 bg-white/5 rounded-lg overflow-hidden flex-none">{s.i && <LazyLoadImage src={getOptimizedImageUrl(s.i.imageUrl, 100) || IMAGE_FALLBACK} alt={s.l} width={100} height={150} loading="lazy" effect="blur" className="w-full h-full object-cover group-hover:scale-110 transition-transform" wrapperClassName="w-full h-full" onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} />}</div>
                                         <div className="flex-1"><div className="text-white font-bold text-sm leading-tight">{s.l}</div><div className="text-gray-500 text-[10px] mt-1">{s.q || 'Movie'} {s.y ? `• ${s.y}` : ''}</div></div>
                                         <i className="fa-solid fa-arrow-up-right-from-square text-gray-600 text-xs group-hover:text-primary"></i>
                                     </div>
@@ -616,12 +618,12 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                     {toastMessage}
                 </div>
             )}
-            <div className="relative h-[40vh] md:h-[60vh]">
-                <div className="absolute top-4 left-4 z-20"><button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-5 h-5" /></button></div>
-                <div className="absolute inset-0 bg-cover bg-center transition-all duration-700" style={{ backgroundImage: `url(${getOptimizedImageUrl(movie.cover || movie.thumbnail, 1280)})` }}></div>
+             <div className="relative min-h-[70vh] md:h-[60vh] md:min-h-0 overflow-hidden">
+                 <div className="absolute top-4 left-4 z-20"><button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-5 h-5" /></button></div>
+                 <div className="absolute inset-0 bg-cover bg-center transition-all duration-700" style={{ backgroundImage: `url(${getOptimizedImageUrl(movie.cover || movie.thumbnail, 1280) || IMAGE_FALLBACK})` }}></div>
                 <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/40 to-transparent"></div>
                 <div className="absolute bottom-0 left-0 w-full p-[4%] flex flex-col md:flex-row items-end gap-6">
-                    <div className="hidden md:block w-[200px] rounded-xl overflow-hidden shadow-2xl border border-white/10"><LazyLoadImage src={getOptimizedImageUrl(movie.thumbnail || movie.cover, 400)} effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { (e.target as HTMLImageElement).src = DEFAULT_FAVICON_FALLBACK; }} /></div>
+                     <div className="hidden md:block w-[200px] h-[300px] rounded-xl overflow-hidden shadow-2xl border border-white/10"><LazyLoadImage src={getOptimizedImageUrl(movie.thumbnail || movie.cover, 400) || IMAGE_FALLBACK} alt={movie.title} width={400} height={600} loading="lazy" effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} /></div>
                     <div className="flex-1">
                         <h1 className="text-3xl md:text-5xl font-extrabold text-white mb-2 drop-shadow-lg">{movie.title}</h1>
                         <div className="flex flex-wrap items-center gap-3 text-sm text-gray-300 mb-4">
@@ -673,7 +675,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                     )}
                     <div className="bg-[#1a1a2e] p-6 rounded-xl border border-white/5">
                         <h3 className="text-lg font-bold text-white mb-3 flex items-center gap-2"><InfoIcon className="w-5 h-5 text-primary" /> Synopsis</h3>
-                        <p className="text-gray-400 leading-relaxed text-sm md:text-base">{movie.description || "No description available."}</p>
+                         <p className="text-gray-400 leading-relaxed text-sm md:text-base">{movie.description?.trim() || 'Synopsis unavailable for this title.'}</p>
                     </div>
                     {movie.cast && movie.cast.length > 0 && (
                         <div className="bg-[#1a1a2e] p-6 rounded-xl border border-white/5">
@@ -683,7 +685,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                                     <button key={i} onClick={() => actor.id ? onStaffClick(actor.id, actor.name, actor.avatar) : undefined} className={`flex-shrink-0 text-center group ${actor.id ? 'cursor-pointer' : 'cursor-default'}`}>
                                         <div className="w-20 h-20 md:w-24 md:h-24 rounded-full overflow-hidden border-2 border-white/10 group-hover:border-primary transition-all mx-auto mb-2">
                                             {actor.avatar ? (
-                                                <LazyLoadImage src={getOptimizedImageUrl(actor.avatar, 150)} alt={actor.name} effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(actor.name)}&background=1a1a2e&color=fff&size=128`; }} />
+                                                 <LazyLoadImage src={getOptimizedImageUrl(actor.avatar, 150) || IMAGE_FALLBACK} alt={actor.name} width={150} height={150} loading="lazy" effect="blur" className="w-full h-full object-cover" wrapperClassName="w-full h-full" onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} />
                                             ) : (
                                                 <div className="w-full h-full bg-gradient-to-br from-primary/20 to-purple-500/20 flex items-center justify-center">
                                                     <i className="fa-solid fa-user text-white/50 text-2xl"></i>
@@ -1497,13 +1499,9 @@ const App: React.FC = () => {
                     currentView={currentView} 
                     isSearchOpen={isSearchOpen} 
                 />
-                <main className="flex-1">
+                 <main className="flex-1 mobile-content-safe">
                     <Suspense fallback={<LoadingView />}>
-                        {currentView === 'home' && (
-                            <div className="pb-24">
-                                <HomePage heroMovies={heroMovies} categoriesData={categoriesData} onMovieClick={handleMovieClick} onToplistClick={handleToplistClick} loading={homeLoading} />
-                            </div>
-                        )}
+                        {currentView === 'home' && <HomePage heroMovies={heroMovies} categoriesData={categoriesData} onMovieClick={handleMovieClick} onToplistClick={handleToplistClick} loading={homeLoading} />}
                         {currentView === 'search' && (
                             <SearchView 
                                 query={searchState.query}
@@ -1586,7 +1584,7 @@ const App: React.FC = () => {
                     </Suspense>
                 </main>
                 <Footer />
-                <div className="fixed bottom-2 left-0 w-full flex justify-center z-50 pointer-events-none px-2">
+                 <div className="fixed bottom-0 left-0 w-full flex justify-center z-50 pointer-events-none px-2 pb-safe lg:hidden">
                     <div className="pointer-events-auto">
                         <Dock magnification={50} distance={80} panelHeight={52} className="bg-[#121212]/95 border-white/15 shadow-[0_10px_35px_rgba(0,0,0,0.85)]">
                             <DockItem onClick={() => { setCurrentView("home"); window.history.pushState({}, "", "/"); resetToHomeSEO(); }}>

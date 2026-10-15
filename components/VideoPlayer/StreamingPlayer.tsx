@@ -133,6 +133,33 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
   const [hoverSeekPercent, setHoverSeekPercent] = useState(0);
   const [hoverSeekTime, setHoverSeekTime] = useState(0);
   const [isForcedLandscape, setIsForcedLandscape] = useState(false);
+  const [mobileViewportWidth, setMobileViewportWidth] = useState(() => (
+    typeof window !== 'undefined'
+      ? (window.visualViewport?.width || window.innerWidth)
+      : 390
+  ));
+
+  // Keep the HUD usable on narrow phones without shrinking the video surface.
+  // The scale is based on the visual viewport so mobile browser UI/rotation
+  // changes are reflected immediately.
+  const mobileLayoutScale = useMemo(() => {
+    if (mobileViewportWidth > 767) return 1;
+    return Math.min(1, Math.max(0.82, mobileViewportWidth / 390));
+  }, [mobileViewportWidth]);
+
+  useEffect(() => {
+    const updateMobileViewportWidth = () => {
+      setMobileViewportWidth(window.visualViewport?.width || window.innerWidth);
+    };
+    const visualViewport = window.visualViewport;
+    window.addEventListener('resize', updateMobileViewportWidth, { passive: true });
+    visualViewport?.addEventListener('resize', updateMobileViewportWidth, { passive: true });
+    updateMobileViewportWidth();
+    return () => {
+      window.removeEventListener('resize', updateMobileViewportWidth);
+      visualViewport?.removeEventListener('resize', updateMobileViewportWidth);
+    };
+  }, []);
 
   // HUD Toast
   const [hudToast, setHudToast] = useState<{ message: string; icon?: string } | null>(null);
@@ -906,7 +933,7 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
         ? "fixed bottom-4 right-4 w-[320px] aspect-video z-[2000] bg-black shadow-2xl rounded-xl overflow-hidden" 
         : (embedded && !isFullscreen)
           ? "relative w-full aspect-video bg-black rounded-2xl overflow-hidden group shadow-2xl border border-white/10"
-          : "fixed inset-0 z-[2000] bg-black group overflow-hidden"
+          : "fixed inset-0 z-[2000] h-[100dvh] min-h-[100dvh] bg-black group overflow-hidden"
       } 
     >
       <style>{`
@@ -923,6 +950,8 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
       <video
         ref={videoRef}
         className={`w-full h-full ${resizeMode === 'cover' ? 'object-cover' : 'object-contain'}`}
+        playsInline
+        preload="metadata"
         onTimeUpdate={() => {
           if (!isDragging && videoRef.current) {
             setCurrentTime(videoRef.current.currentTime);
@@ -1095,6 +1124,7 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
         onSkipRecap={handleSkipRecap}
         isRecapActive={isRecapActive}
         isIntroActive={isIntroActive}
+        mobileScale={mobileLayoutScale}
       />
 
       {/* Audio & Subtitles Modal */}
@@ -1380,3 +1410,5 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     </div>
   );
 };
+
+/* END: Custom mobile layout scaling */

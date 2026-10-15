@@ -2,7 +2,9 @@ import React from 'react';
 import { LazyLoadImage } from 'react-lazy-load-image-component';
 import 'react-lazy-load-image-component/src/effects/blur.css';
 import { MovieResult } from '../types';
-import { getOptimizedImageUrl, DEFAULT_FAVICON_FALLBACK } from '../utils/image';
+import { getOptimizedImageUrl } from '../utils/image';
+
+const IMAGE_FALLBACK = '/icons/slflix.png';
 interface MovieCardProps {
     movie: MovieResult;
     onClick: (m: MovieResult) => void;
@@ -29,15 +31,19 @@ const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, progress }) => {
         >
             <div className="w-full aspect-[2/3] rounded-xl overflow-hidden border border-white/5 transition-all duration-300 group-hover:border-primary group-hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] group-hover:shadow-primary/20 relative bg-[#111]">
                 <LazyLoadImage 
-                    src={getOptimizedImageUrl(movie.cover, 300)} 
+                    src={getOptimizedImageUrl(movie.cover || movie.thumbnail, 300) || IMAGE_FALLBACK}
                     alt={movie.title}
+                    width={300}
+                    height={450}
+                    loading="lazy"
                     effect="blur"
                     className="w-full h-full object-cover object-center"
                     wrapperClassName="w-full h-full"
                     onError={(e) => {
                         const target = e.target as HTMLImageElement;
-                        if (target.src !== DEFAULT_FAVICON_FALLBACK) {
-                            target.src = DEFAULT_FAVICON_FALLBACK;
+                        if (target.src !== IMAGE_FALLBACK) {
+                            target.onerror = null;
+                            target.src = IMAGE_FALLBACK;
                         }
                     }}
                 />

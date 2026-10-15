@@ -42,3 +42,18 @@ test('watch-party invites support share links, codes, and host approval', () => 
   assert.match(client, /navigator\.share/);
   assert.match(client, /Request to Join/);
 });
+
+test('watch-party entry mode is server-authoritative and visible in the host UI', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(server, /entryMode: cleanRoomEntryMode\(payload\.entryMode\)/);
+  assert.match(server, /const requiresApproval = room\.entryMode === 'manual' && !isCreatorUser/);
+  assert.match(server, /Auto-Enter is enforced here rather than trusting the request flag/);
+  assert.match(server, /socket\.on\('set_room_entry_mode'/);
+  assert.match(server, /const host = isRoomMember\(room, socket\)/);
+  assert.match(server, /room\.pendingRequests = \[\]/);
+  assert.match(client, /set_room_entry_mode/);
+  assert.match(client, /Manual Approval/);
+  assert.match(client, /Auto-Enter/);
+  assert.match(client, /isAutoEntry \? '' : '&request=1'/);
+});

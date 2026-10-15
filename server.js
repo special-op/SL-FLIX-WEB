@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import https from 'https';
 import { URL } from 'url';
 import compression from 'compression';
+import { randomUUID } from 'crypto';
 import { Resvg } from '@resvg/resvg-js';
 import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
@@ -126,7 +127,7 @@ function getActiveRoomsList() {
         // Prevent spam: only list rooms with active viewers or created less than 2 minutes ago
         .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < 2 * 60 * 1000))
         .map(r => {
-            const { pendingRequests, ...publicRoom } = r;
+            const { pendingRequests, hostToken, ...publicRoom } = r;
             return { ...publicRoom, currentTime: getRoomCurrentTime(r) };
         });
 }
@@ -159,6 +160,7 @@ const USERNAME_MAX_LENGTH = 40;
 const ROOM_NAME_MAX_LENGTH = 120;
 const MESSAGE_MAX_LENGTH = 1000;
 const MAX_PENDING_ROOM_REQUESTS = 50;
+const ROOM_ENTRY_MODES = new Set(['manual', 'auto']);
 
 function cleanText(value, maxLength, fallback = '') {
     if (typeof value !== 'string') return fallback;
@@ -170,12 +172,22 @@ function cleanRoomIdValue(value) {
     return ROOM_ID_PATTERN.test(roomId) ? roomId : '';
 }
 
+function cleanRoomEntryMode(value) {
+    return ROOM_ENTRY_MODES.has(value) ? value : 'manual';
+}
+
 function validRoomPayload(payload) {
     return payload !== null && typeof payload === 'object' && !Array.isArray(payload);
 }
 
 function isRoomMember(room, socket) {
     return room?.users?.find(user => user.id === socket.data.identity?.id) || null;
+}
+
+function getRoomStateForSocket(room, socket) {
+    const { hostToken, pendingRequests, ...publicRoom } = room;
+    const member = isRoomMember(room, socket);
+    return member?.isCreator ? { ...publicRoom, hostToken, pendingRequests: pendingRequests || [] } : publicRoom;
 }
 
 function isSocketRateLimited(socket) {
@@ -218,6 +230,8 @@ io.on('connection', (socket) => {
             roomId: cleanRoomId,
             roomName: cleanText(roomName, ROOM_NAME_MAX_LENGTH, `Room ${cleanRoomId}`),
             creator: cleanUsername,
+            entryMode: cleanRoomEntryMode(payload.entryMode),
+            hostToken: randomUUID(),
             movie: movie && typeof movie === 'object' ? movie : null,
             currentSeason: Number.isInteger(Number(season)) && Number(season) >= 1 ? Number(season) : 1,
             currentEpisode: Number.isInteger(Number(episode)) && Number(episode) >= 1 ? Number(episode) : 1,
@@ -231,7 +245,7 @@ io.on('connection', (socket) => {
         };
         watchRooms.set(cleanRoomId, room);
         broadcastActiveRooms();
-        socket.emit('room_state', room);
+        socket.emit('room_state', getRoomStateForSocket(room, socket));
     });
 
     socket.on('join_room', (payload) => {
@@ -251,9 +265,12 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            if (payload.request === true) {
-                if (room.users.some(user => user.name.toLowerCase() === cleanUsername.toLowerCase())) {
-                    return socket.emit('room_state', room);
+            const isHostReconnect = typeof payload.hostToken === 'string' && payload.hostToken === room.hostToken;
+            const isCreatorUser = isHostReconnect;
+            const requiresApproval = room.entryMode === 'manual' && !isCreatorUser;
+            if (requiresApproval) {
+                if (isRoomMember(room, socket)) {
+                    return socket.emit('room_state', getRoomStateForSocket(room, socket));
                 }
                 room.pendingRequests = Array.isArray(room.pendingRequests) ? room.pendingRequests : [];
                 const existingRequest = room.pendingRequests.find(request => request.socketId === socket.id);
@@ -280,9 +297,11 @@ io.on('connection', (socket) => {
                 });
             }
 
+            // Auto-Enter is enforced here rather than trusting the request flag. A direct
+            // link, reconnect, or client that asks for approval must still enter immediately.
+            room.pendingRequests = (room.pendingRequests || []).filter(request => request.socketId !== socket.id);
             socket.join(cleanRoomId);
             const currentComputedTime = getRoomCurrentTime(room);
-            const isCreatorUser = room.creator.toLowerCase() === cleanUsername.toLowerCase();
             const existingUserIndex = room.users.findIndex(u => u.name.toLowerCase() === cleanUsername.toLowerCase());
             if (existingUserIndex >= 0) {
                 room.users[existingUserIndex].id = socket.id;
@@ -293,7 +312,7 @@ io.on('connection', (socket) => {
             room.updatedAt = Date.now();
 
             const syncPayload = {
-                ...room,
+                ...getRoomStateForSocket(room, socket),
                 currentTime: currentComputedTime,
                 messages: room.messages || []
             };
@@ -303,6 +322,42 @@ io.on('connection', (socket) => {
         } else {
             socket.emit('error_message', { message: 'Watch party not found or was ended by the host.' });
         }
+    });
+
+    socket.on('set_room_entry_mode', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const host = isRoomMember(room, socket);
+        if (!room || !host?.isCreator) {
+            return socket.emit('error_message', { message: 'Only the room host can change the entry mode.' });
+        }
+        if (!ROOM_ENTRY_MODES.has(payload.entryMode)) {
+            return socket.emit('error_message', { message: 'Invalid watch-party entry mode.' });
+        }
+
+        const entryMode = cleanRoomEntryMode(payload.entryMode);
+        room.entryMode = entryMode;
+        room.updatedAt = Date.now();
+
+        // Guests waiting for approval should enter as soon as the host switches to Auto-Enter.
+        if (entryMode === 'auto') {
+            const pendingRequests = Array.isArray(room.pendingRequests) ? room.pendingRequests : [];
+            room.pendingRequests = [];
+            for (const request of pendingRequests) {
+                const targetSocket = io.sockets.sockets.get(request.socketId);
+                if (!targetSocket || room.users.some(user => user.id === targetSocket.id || user.name.toLowerCase() === request.username.toLowerCase())) {
+                    continue;
+                }
+                targetSocket.join(roomId);
+                room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+                targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
+                io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
+            }
+        }
+
+        io.to(roomId).emit('room_entry_mode_changed', { entryMode, users: room.users });
+        broadcastActiveRooms();
     });
 
     socket.on('room_join_request_decision', (payload) => {
@@ -325,7 +380,7 @@ io.on('connection', (socket) => {
         targetSocket.join(roomId);
         room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
         room.updatedAt = Date.now();
-        targetSocket.emit('room_state', { ...room, currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
+         targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
         io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
         broadcastActiveRooms();
     });

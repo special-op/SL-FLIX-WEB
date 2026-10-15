@@ -3,6 +3,33 @@ import { io as socketIoClient } from 'socket.io-client';
 import { ApiService } from '../services/api';
 import { MovieResult, VideoSource, Subtitle, Season } from '../types';
 import VideoPlayer from './VideoPlayer';
+import { getOptimizedImageUrl } from '../utils/image';
+
+type RoomEntryMode = 'manual' | 'auto';
+
+const getEntryModeLabel = (entryMode: RoomEntryMode = 'manual') => (
+    entryMode === 'auto' ? 'Auto-Enter' : 'Manual Approval'
+);
+const WATCH_PARTY_FALLBACK = '/icons/slflix.png';
+const getPosterSrc = (movie: any, width: number) => {
+    const poster = typeof movie?.cover === 'string' && movie.cover
+        ? movie.cover
+        : typeof movie?.thumbnail === 'string' && movie.thumbnail
+            ? movie.thumbnail
+            : typeof movie?.posterUrl === 'string' && movie.posterUrl
+                ? movie.posterUrl
+                : '';
+    return getOptimizedImageUrl(poster, width) || WATCH_PARTY_FALLBACK;
+};
+
+const WATCH_PARTY_CATEGORIES = [
+    { id: 'trending', label: 'Trending' },
+    { id: 'movies', label: 'Movies' },
+    { id: 'anime', label: 'Anime' },
+    { id: 'nollywood', label: 'Nollywood' },
+    { id: 'k_drama', label: 'K-Drama' },
+    { id: 'c_drama', label: 'C-Drama' },
+];
 
 const getSocketInstance = () => {
     try {
@@ -22,6 +49,8 @@ interface WatchRoom {
     users: { id: string; name: string; isCreator: boolean }[];
     currentTime: number;
     paused: boolean;
+    entryMode: RoomEntryMode;
+    hostToken?: string;
     messages?: { id?: string; username: string; message: string; timestamp: number }[];
     kickedUsers?: string[];
     pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
@@ -36,6 +65,7 @@ export const WatchPartyView: React.FC<{
     const [currentRoom, setCurrentRoom] = useState<WatchRoom | null>(null);
     const [username, setUsername] = useState<string>(() => localStorage.getItem('slflix_username') || `Viewer_${Math.floor(Math.random() * 10000)}`);
     const [roomNameInput, setRoomNameInput] = useState('');
+    const [createEntryMode, setCreateEntryMode] = useState<RoomEntryMode>('manual');
     const [chatMessages, setChatMessages] = useState<{ id?: string; username: string; message: string; timestamp: number }[]>([]);
     const [chatInput, setChatInput] = useState('');
     const [sidebarTab, setSidebarTab] = useState<'chat' | 'participants'>('chat');
@@ -64,6 +94,8 @@ export const WatchPartyView: React.FC<{
     const [isSearching, setIsSearching] = useState(false);
     const [searchResults, setSearchResults] = useState<MovieResult[]>([]);
     const [selectedMovie, setSelectedMovie] = useState<MovieResult | null>(null);
+    const [selectedCategory, setSelectedCategory] = useState('');
+    const [isLoadingCategory, setIsLoadingCategory] = useState(false);
     
     // TV Series & Episode Management
     const [movieDetails, setMovieDetails] = useState<any | null>(null);
@@ -92,7 +124,11 @@ export const WatchPartyView: React.FC<{
         s.on('connect', () => {
             const activeRoom = currentRoomRef.current;
             if (activeRoom) {
-                s.emit('join_room', { roomId: activeRoom.roomId, username: usernameRef.current });
+                s.emit('join_room', {
+                    roomId: activeRoom.roomId,
+                    username: usernameRef.current,
+                    hostToken: activeRoom.hostToken || localStorage.getItem(`slflix_host_token_${activeRoom.roomId}`) || undefined
+                });
             } else {
                 s.emit('get_active_rooms');
             }
@@ -106,6 +142,11 @@ export const WatchPartyView: React.FC<{
 
         s.on('room_state', (room: WatchRoom) => {
             setCurrentRoom(room);
+            if (room.hostToken) {
+                try {
+                    localStorage.setItem(`slflix_host_token_${room.roomId}`, room.hostToken);
+                } catch (e) {}
+            }
             setJoinRequestState('idle');
             if (room.pendingRequests) setJoinRequests(room.pendingRequests);
             setRoomSyncTimestamp(Date.now());
@@ -148,6 +189,16 @@ export const WatchPartyView: React.FC<{
         s.on('room_join_request', (request: { requestId: string; username: string; requestedAt: number }) => {
             setJoinRequests(prev => prev.some(item => item.requestId === request.requestId) ? prev : [...prev, request]);
             setPauseNotice(`${request.username} wants to join your room`);
+        });
+        s.on('room_entry_mode_changed', (data: { entryMode: RoomEntryMode; users?: WatchRoom['users'] }) => {
+            setCurrentRoom(prev => prev ? {
+                ...prev,
+                entryMode: data.entryMode,
+                users: data.users || prev.users
+            } : null);
+            if (data.entryMode === 'auto') setJoinRequests([]);
+            setPauseNotice(`Entry mode: ${getEntryModeLabel(data.entryMode)}`);
+            setTimeout(() => setPauseNotice(null), 2500);
         });
 
         s.on('room_user_joined', (data: { username: string; usersCount: number; users?: any[] }) => {
@@ -264,7 +315,12 @@ export const WatchPartyView: React.FC<{
             setTimeout(() => {
                 const storedName = localStorage.getItem('slflix_username') || username;
                 const cleanParam = roomParam.trim().toUpperCase();
-                s.emit('join_room', { roomId: cleanParam, username: storedName, request: requestParam });
+                s.emit('join_room', {
+                    roomId: cleanParam,
+                    username: storedName,
+                    request: requestParam,
+                    hostToken: localStorage.getItem(`slflix_host_token_${cleanParam}`) || undefined
+                });
             }, 600);
         }
 
@@ -278,7 +334,7 @@ export const WatchPartyView: React.FC<{
         chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [chatMessages]);
 
-    const isCreator = currentRoom ? (currentRoom.users.find(u => u.name === username)?.isCreator || currentRoom.creator === username) : false;
+    const isCreator = Boolean(currentRoom && socket?.id && currentRoom.users.find(u => u.id === socket.id)?.isCreator);
 
     // Load sources when selected movie / episode changes
     useEffect(() => {
@@ -342,6 +398,7 @@ export const WatchPartyView: React.FC<{
     // Search Engine Execution
     const executeSearch = async (q: string) => {
         setSearchQuery(q);
+        setSelectedCategory('');
         if (q.trim().length < 2) {
             setSearchResults([]);
             return;
@@ -416,7 +473,8 @@ export const WatchPartyView: React.FC<{
             roomId,
             roomName: roomNameInput.trim(),
             username,
-            movie: selectedMovie || { title: 'Avengers: Endgame', cover: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800', subjectId: 'demo' },
+            entryMode: createEntryMode,
+            movie: selectedMovie || { title: 'Choose a title to begin', cover: WATCH_PARTY_FALLBACK, thumbnail: WATCH_PARTY_FALLBACK, subjectId: 'demo' },
             season: selectedSeason,
             episode: selectedEpisode
         });
@@ -431,10 +489,11 @@ export const WatchPartyView: React.FC<{
 
     const handleShareInvite = async () => {
         if (!currentRoom) return;
-        const inviteUrl = `${window.location.origin}/watch-party?room=${currentRoom.roomId}&request=1`;
+        const isAutoEntry = (currentRoom.entryMode || 'manual') === 'auto';
+        const inviteUrl = `${window.location.origin}/watch-party?room=${currentRoom.roomId}${isAutoEntry ? '' : '&request=1'}`;
         const shareData = {
             title: `Join ${currentRoom.roomName} on SLFLIX`,
-            text: `Request to join my watch room with code ${currentRoom.roomId}.`,
+            text: `${isAutoEntry ? 'Join' : 'Request to join'} my watch room with code ${currentRoom.roomId}.`,
             url: inviteUrl
         };
         try {
@@ -447,6 +506,22 @@ export const WatchPartyView: React.FC<{
             window.setTimeout(() => setInviteCopied(false), 2000);
         } catch {
             // Sharing can be cancelled by the user; do not show an error for that.
+        }
+    };
+
+    const loadCategory = async (category: string) => {
+        setSelectedCategory(category);
+        setSearchQuery('');
+        setSearchResults([]);
+        if (!category) return;
+        setIsLoadingCategory(true);
+        try {
+            const result = await ApiService.getRankingList(category, 1, 12);
+            setSearchResults(result.results || []);
+        } catch (e) {
+            setSearchResults([]);
+        } finally {
+            setIsLoadingCategory(false);
         }
     };
 
@@ -468,6 +543,11 @@ export const WatchPartyView: React.FC<{
         setJoinRequestState('pending');
         socket.emit('join_room', { roomId: cleanId, username, request: true });
         window.history.pushState({}, '', `/watch-party?room=${cleanId}&request=1`);
+    };
+
+    const handleEntryModeChange = (entryMode: RoomEntryMode) => {
+        if (!socket || !currentRoom || !isCreator) return;
+        socket.emit('set_room_entry_mode', { roomId: currentRoom.roomId, entryMode });
     };
 
     const handleKickUser = (targetUsername: string) => {
@@ -493,6 +573,7 @@ export const WatchPartyView: React.FC<{
     const handleLeaveRoom = () => {
         if (socket && currentRoom) {
             socket.emit('leave_room', { roomId: currentRoom.roomId, username });
+            localStorage.removeItem(`slflix_host_token_${currentRoom.roomId}`);
         }
         setCurrentRoom(null);
         setSelectedMovie(null);
@@ -518,6 +599,7 @@ export const WatchPartyView: React.FC<{
             setSubtitles([]);
             setChatMessages([]);
             window.history.pushState({}, '', '/watch-party');
+            localStorage.removeItem(`slflix_host_token_${rId}`);
         }
         socket.emit('get_active_rooms');
     };
@@ -553,7 +635,7 @@ export const WatchPartyView: React.FC<{
     };
 
     return (
-        <div className="min-h-screen bg-[#07080d] text-white pt-20 pb-20 px-4 sm:px-8">
+        <div className="min-h-screen bg-[#07080d] text-white pt-6 pb-20 px-4 sm:px-8 mobile-content-safe">
                  <div className="max-w-7xl mx-auto">
                 {/* Header Navigation */}
                 <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-6">
@@ -606,6 +688,18 @@ export const WatchPartyView: React.FC<{
                                         required 
                                     />
                                 </div>
+                                <div>
+                                    <label htmlFor="watch-party-entry-mode" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Guest Entry Mode</label>
+                                        <select
+                                            id="watch-party-entry-mode"
+                                            value={createEntryMode}
+                                            onChange={(e) => setCreateEntryMode(e.target.value as RoomEntryMode)}
+                                            className="w-full min-h-11 bg-[#0a0b14] border border-white/10 rounded-xl py-2 px-3 text-white text-xs outline-none focus:border-cyan-500"
+                                    >
+                                        <option value="manual">Manual Approval</option>
+                                        <option value="auto">Auto-Enter</option>
+                                    </select>
+                                </div>
 
                                 {/* Main Search Engine Picker */}
                                 <div>
@@ -613,7 +707,7 @@ export const WatchPartyView: React.FC<{
                                         <span>Pick Movie or Series</span>
                                         <span className="text-cyan-400 font-normal">Main Search Engine</span>
                                     </label>
-                                    <div className="relative mb-2">
+                                     <div className="relative mb-2">
                                         <input 
                                             type="text" 
                                             value={searchQuery} 
@@ -622,13 +716,27 @@ export const WatchPartyView: React.FC<{
                                             placeholder="Search catalog for movies, series, anime..."
                                         />
                                         <i className="fa-solid fa-search absolute left-2.5 top-2.5 text-gray-400 text-xs"></i>
-                                        {isSearching && <div className="absolute right-2.5 top-2.5 w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"></div>}
-                                    </div>
+                                         {isSearching && <div className="absolute right-2.5 top-2.5 w-3.5 h-3.5 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin"></div>}
+                                     </div>
+
+                                     <label htmlFor="watch-party-category" className="sr-only">Browse a category</label>
+                                     <select
+                                         id="watch-party-category"
+                                         value={selectedCategory}
+                                         onChange={(e) => loadCategory(e.target.value)}
+                                         className="w-full min-h-11 bg-[#0a0b14] border border-white/10 rounded-xl px-3 text-xs text-gray-200 outline-none focus:border-cyan-500 mb-2"
+                                     >
+                                         <option value="">Or browse a category</option>
+                                         {WATCH_PARTY_CATEGORIES.map(category => (
+                                             <option key={category.id} value={category.id}>{category.label}</option>
+                                         ))}
+                                     </select>
+                                     {isLoadingCategory && <p className="text-[10px] text-cyan-300 mb-2" role="status">Loading category titles…</p>}
 
                                     {/* Selected Movie Preview */}
                                     {selectedMovie && (
                                         <div className="flex items-center gap-3 bg-cyan-500/10 border border-cyan-500/30 p-2.5 rounded-xl mb-2">
-                                            <img src={selectedMovie.cover} alt="" className="w-10 h-14 object-cover rounded-lg flex-shrink-0" />
+                                             <img src={getPosterSrc(selectedMovie, 100)} alt="" width={80} height={120} loading="lazy" className="w-10 h-14 object-cover rounded-lg flex-shrink-0" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = WATCH_PARTY_FALLBACK; }} />
                                             <div className="min-w-0">
                                                 <div className="text-xs font-bold text-cyan-300 truncate">{selectedMovie.title}</div>
                                                 <div className="text-[10px] text-gray-400">{selectedMovie.releaseDate || 'Ready to Stream'}</div>
@@ -639,19 +747,20 @@ export const WatchPartyView: React.FC<{
                                     {/* Live Search Engine Results */}
                                     {searchResults.length > 0 && (
                                         <div className="max-h-48 overflow-y-auto bg-[#0a0b14] border border-white/10 rounded-xl p-2 space-y-1.5 shadow-xl">
-                                            {searchResults.map((m, i) => (
-                                                <div 
-                                                    key={i} 
-                                                    onClick={() => { setSelectedMovie(m); setSearchResults([]); setSearchQuery(m.title); }} 
-                                                    className="flex items-center gap-2.5 p-1.5 hover:bg-white/10 rounded-lg cursor-pointer text-xs group transition-colors"
-                                                >
-                                                    <img src={m.cover} alt="" className="w-8 h-10 object-cover rounded flex-shrink-0" />
-                                                    <div className="truncate">
-                                                        <p className="font-bold text-white group-hover:text-cyan-400 truncate">{m.title}</p>
-                                                        <p className="text-[10px] text-gray-400">{m.type || 'Movie'} • {m.releaseDate || '2024'}</p>
-                                                    </div>
-                                                </div>
-                                            ))}
+                                             {searchResults.map((m, i) => (
+                                                 <button
+                                                     type="button"
+                                                     key={i} 
+                                                     onClick={() => { setSelectedMovie(m); setSearchResults([]); setSearchQuery(m.title); }} 
+                                                     className="w-full min-h-11 flex items-center gap-2.5 p-1.5 hover:bg-white/10 rounded-lg cursor-pointer text-xs group transition-colors text-left"
+                                                 >
+                                                     <img src={getPosterSrc(m, 80)} alt="" width={64} height={96} loading="lazy" className="w-8 h-10 object-cover rounded flex-shrink-0" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = WATCH_PARTY_FALLBACK; }} />
+                                                     <div className="truncate">
+                                                         <p className="font-bold text-white group-hover:text-cyan-400 truncate">{m.title}</p>
+                                                         <p className="text-[10px] text-gray-400">{m.type || 'Movie'} • {m.releaseDate || '2024'}</p>
+                                                     </div>
+                                                 </button>
+                                             ))}
                                         </div>
                                     )}
                                 </div>
@@ -694,9 +803,10 @@ export const WatchPartyView: React.FC<{
                                                 </div>
                                                 <h3 className="text-sm font-black text-white mb-0.5 group-hover:text-cyan-400 transition-colors">{room.roomName}</h3>
                                                 <p className="text-[11px] text-gray-400 mb-3">Host: <span className="text-gray-300 font-semibold">{room.creator}</span></p>
+                                                <p className="text-[10px] text-cyan-300 font-semibold mb-3">Entry: {getEntryModeLabel(room.entryMode || 'manual')}</p>
                                                 {room.movie && (
                                                     <div className="flex items-center gap-3 bg-black/50 p-2 rounded-xl mb-4 border border-white/5">
-                                                        <img src={room.movie.cover} alt="" className="w-10 h-14 object-cover rounded-lg flex-shrink-0" />
+                                                         <img src={getPosterSrc(room.movie, 100)} alt="" width={80} height={120} loading="lazy" className="w-10 h-14 object-cover rounded-lg flex-shrink-0" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = WATCH_PARTY_FALLBACK; }} />
                                                         <div className="truncate">
                                                             <div className="text-xs font-bold text-gray-200 truncate">{room.movie.title}</div>
                                                             <div className="text-[10px] text-cyan-400 font-mono mt-0.5 flex items-center gap-1.5">
@@ -718,10 +828,10 @@ export const WatchPartyView: React.FC<{
                                             </div>
                                             <div className="flex items-center gap-2">
                                                  <button 
-                                                     onClick={() => handleRequestRoom(room.roomId)}
+                                                     onClick={() => room.entryMode === 'auto' ? handleJoinRoom(room.roomId) : handleRequestRoom(room.roomId)}
                                                     className="flex-1 py-2.5 bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs rounded-xl transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md"
                                                 >
-                                                     <i className="fa-solid fa-paper-plane"></i> Request to Join
+                                                     <i className={`fa-solid ${room.entryMode === 'auto' ? 'fa-right-to-bracket' : 'fa-paper-plane'}`}></i> {room.entryMode === 'auto' ? 'Join Now' : 'Request to Join'}
                                                 </button>
                                                 {(room.creator === username || room.creator === localStorage.getItem('slflix_username')) && (
                                                     <button
@@ -860,6 +970,25 @@ export const WatchPartyView: React.FC<{
                                     </div>
                                 </div>
                                 <div className="flex items-center flex-wrap gap-2">
+                                    {isCreator ? (
+                                        <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs font-bold text-amber-200">
+                                            <i className="fa-solid fa-door-open text-amber-300"></i>
+                                            <span>Entry:</span>
+                                            <select
+                                                value={currentRoom.entryMode || 'manual'}
+                                                onChange={(e) => handleEntryModeChange(e.target.value as RoomEntryMode)}
+                                                aria-label="Watch party entry mode"
+                                                className="min-h-11 bg-transparent text-amber-100 outline-none cursor-pointer"
+                                            >
+                                                <option className="bg-[#121322]" value="manual">Manual Approval</option>
+                                                <option className="bg-[#121322]" value="auto">Auto-Enter</option>
+                                            </select>
+                                        </label>
+                                    ) : (
+                                        <span className="px-3 py-2 rounded-xl bg-white/5 border border-white/10 text-xs font-bold text-gray-300">
+                                            Entry: {getEntryModeLabel(currentRoom.entryMode || 'manual')}
+                                        </span>
+                                    )}
                                     {/* Series Episode Selector Button */}
                                     {(() => {
                                         const rawType = String(selectedMovie?.type || movieDetails?.type || currentRoom.movie?.type || '').toLowerCase();
@@ -1003,7 +1132,7 @@ export const WatchPartyView: React.FC<{
                         </div>
 
                         {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
-                        <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 flex flex-col h-[580px] shadow-2xl">
+                         <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 flex flex-col min-h-[420px] h-[min(580px,calc(100dvh-12rem))] lg:h-[580px] shadow-2xl">
                             {/* Header with Dual Tabs: Chat & Participants */}
                             <div className="flex items-center justify-between pb-3 border-b border-white/10 mb-3">
                                 <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-2xl border border-white/5">
