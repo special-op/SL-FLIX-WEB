@@ -9,6 +9,11 @@ import {
 import { motion } from 'motion/react';
 import AnimeThreeCanvas from './AnimeThreeCanvas';
 
+const stripAnimeTags = (value: string = '') => value
+  .replace(/\s*\[[^\]]*\]\s*/g, ' ')
+  .replace(/\s{2,}/g, ' ')
+  .trim();
+
 interface AnimeDetailViewProps {
   animeItem: AnimeItem;
   onBack: () => void;
@@ -201,6 +206,7 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
 
   const currentServer = detail?.downloads?.[activeServerIndex];
   const streamSourceUrl = resolvedStream?.streamProxyUrl || resolvedStream?.directUrl;
+  const displayTitle = stripAnimeTags(detail?.title || animeItem.title);
 
   return (
     <div className="min-h-screen bg-[#070817] text-white pb-36 animate-fade-in relative">
@@ -209,7 +215,8 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
         <div className="flex items-center gap-3 min-w-0">
           <button
             onClick={onBack}
-            className="w-10 h-10 rounded-xl bg-white/10 hover:bg-primary hover:text-black border border-white/15 flex items-center justify-center transition-all cursor-pointer flex-shrink-0"
+             aria-label="Back to Anime Hub"
+             className="touch-target w-12 h-12 rounded-xl bg-white/10 hover:bg-primary hover:text-black border border-white/15 flex items-center justify-center transition-all cursor-pointer flex-shrink-0"
             title="Back to Anime Hub"
           >
             <ArrowLeft size={18} />
@@ -221,7 +228,7 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
               <span className="text-primary truncate">Nimegami Archive</span>
             </div>
             <h1 className="text-sm md:text-base font-black text-white truncate max-w-xl">
-              {detail?.title || animeItem.title}
+               {displayTitle}
             </h1>
           </div>
         </div>
@@ -374,7 +381,7 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
               <div className="w-full h-full relative bg-black">
                 <iframe
                   src={resolvedStream?.embedUrl || detail?.video}
-                  title={detail?.title || animeItem.title}
+                   title={displayTitle}
                   className="w-full h-full border-0"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
                   allowFullScreen
@@ -515,14 +522,16 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
         )}
 
         {/* Detailed Anime Overview & Metadata Card */}
-        <div className="bg-[#0e1022] border border-white/15 rounded-3xl p-6 md:p-8 flex flex-col md:flex-row gap-6 shadow-xl relative overflow-hidden">
-          <div className="w-32 md:w-44 aspect-[3/4] rounded-2xl overflow-hidden flex-shrink-0 shadow-2xl border border-white/15 bg-black/40">
-            <LazyLoadImage
-              src={animeItem.image}
-              alt={animeItem.title}
-              className="w-full h-full object-cover"
-            />
-          </div>
+         <div className="bg-[#0e1022] border border-white/15 rounded-3xl p-6 md:p-8 flex flex-col md:flex-row gap-6 shadow-xl relative overflow-hidden">
+           {(detail?.image || animeItem.image) && (
+             <div className="w-32 md:w-44 aspect-[3/4] rounded-2xl overflow-hidden flex-shrink-0 shadow-2xl border border-white/15 bg-black/40">
+               <LazyLoadImage
+                 src={detail?.image || animeItem.image}
+                 alt={displayTitle}
+                 className="w-full h-full object-cover"
+               />
+             </div>
+           )}
 
           <div className="flex-1 space-y-4 min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -538,7 +547,7 @@ export const AnimeDetailView: React.FC<AnimeDetailViewProps> = ({
             </div>
 
             <h2 className="text-xl md:text-3xl font-black text-white leading-tight">
-              {detail?.title || animeItem.title}
+               {displayTitle}
             </h2>
 
             <div className="space-y-2">

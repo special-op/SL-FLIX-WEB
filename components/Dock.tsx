@@ -36,6 +36,7 @@ type DockItemProps = {
   className?: string;
   children: React.ReactNode;
   onClick?: () => void;
+  ariaLabel?: string;
 };
 type DockLabelProps = {
   className?: string;
@@ -116,7 +117,7 @@ function Dock({
     </motion.div>
   );
 }
-function DockItem({ children, className, onClick }: DockItemProps) {
+function DockItem({ children, className, onClick, ariaLabel }: DockItemProps) {
   const ref = useRef<HTMLDivElement>(null);
   const { distance, magnification, mouseX, spring } = useDock();
   const isHovered = useMotionValue(0);
@@ -155,7 +156,7 @@ function DockItem({ children, className, onClick }: DockItemProps) {
       )}
       tabIndex={0}
       role='button'
-      aria-haspopup='true'
+      aria-label={ariaLabel}
     >
       {Children.map(children, (child) =>
         cloneElement(child as React.ReactElement, { width, isHovered })

@@ -392,7 +392,7 @@ const Navbar: React.FC<{
                       <button onClick={onNovels} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'novels' ? 'text-cyan-400' : 'text-gray-300 hover:text-cyan-400'}`}><i className="fa-solid fa-book-open text-cyan-400" aria-hidden="true"></i><span>Novels</span></button>
                       <button onClick={onWatchParty} className={`hidden lg:flex shrink-0 min-h-11 items-center gap-1.5 px-2 text-sm font-medium whitespace-nowrap ${currentView === 'watch-party' ? 'text-purple-400' : 'text-gray-300 hover:text-purple-400'}`}><i className="fa-solid fa-users-viewfinder text-purple-400" aria-hidden="true"></i><span>Watch Party</span></button>
                      {onAdult && (
-                         <button onClick={onAdult} className={`shrink-0 min-h-11 px-2.5 py-1 rounded-full text-xs font-black uppercase tracking-wider flex items-center gap-1 transition-all whitespace-nowrap ${currentView === 'adult' ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white shadow-lg shadow-fuchsia-600/40' : 'bg-fuchsia-500/10 text-fuchsia-400 hover:bg-fuchsia-500/20 border border-fuchsia-500/30'}`}>
+                          <button onClick={onAdult} aria-label="Open adult titles" className={`hidden lg:flex shrink-0 min-h-11 px-2.5 py-1 rounded-full text-xs font-black uppercase tracking-wider items-center gap-1 transition-all whitespace-nowrap ${currentView === 'adult' ? 'bg-gradient-to-r from-fuchsia-600 to-pink-600 text-white shadow-lg shadow-fuchsia-600/40' : 'bg-fuchsia-500/10 text-fuchsia-400 hover:bg-fuchsia-500/20 border border-fuchsia-500/30'}`}>
                              <i className="fa-solid fa-shield-cat" aria-hidden="true"></i>
                             <span>+18</span>
                         </button>
@@ -473,7 +473,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
     onStaffClick: (id: string, name: string, avatar?: string) => void,
     loading: boolean
 }> = ({ movie, onBack, onFetchSources, onPlayTrailer, onMovieClick, onDubClick, onStaffClick, loading }) => {
-    const [selectedSeason, setSelectedSeason] = useState(1);
+    const [selectedSeason, setSelectedSeason] = useState(movie.seasons?.[0]?.seasonNumber || 1);
     const [copied, setCopied] = useState(false);
     const [toastMessage, setToastMessage] = useState<string | null>(null);
     const [watchedProgress, setWatchedProgress] = useState<Record<string, any>>({});
@@ -510,6 +510,11 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
     const currentSeasonData = movie.seasons?.find(s => s.seasonNumber === selectedSeason);
     const episodeCount = currentSeasonData?.episodeCount || 0;
     const showSeasons = hasSeasons;
+    useEffect(() => {
+        if (movie.seasons && movie.seasons.length > 0 && !movie.seasons.some(season => season.seasonNumber === selectedSeason)) {
+            setSelectedSeason(movie.seasons[0].seasonNumber);
+        }
+    }, [movie.seasons, selectedSeason]);
     const [recPage, setRecPage] = useState(0);
     const recsPerPage = 6;
     const maxRecPages = movie.recommendations ? Math.ceil(movie.recommendations.length / recsPerPage) : 0;
@@ -520,7 +525,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                 {/* Hero Backdrop & Poster Skeleton */}
                 <div className="relative h-[40vh] md:h-[60vh] overflow-hidden">
                     <div className="absolute top-4 left-4 z-20">
-                        <button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors">
+                        <button onClick={onBack} aria-label="Go back" title="Go back" className="touch-target bg-black/40 backdrop-blur-md border border-white/10 w-12 h-12 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors">
                             <BackIcon className="w-5 h-5" />
                         </button>
                     </div>
@@ -619,7 +624,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                 </div>
             )}
              <div className="relative min-h-[70vh] md:h-[60vh] md:min-h-0 overflow-hidden">
-                 <div className="absolute top-4 left-4 z-20"><button onClick={onBack} aria-label="Go back" title="Go back" className="bg-black/40 backdrop-blur-md border border-white/10 w-10 h-10 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-5 h-5" /></button></div>
+                  <div className="absolute top-4 left-4 z-20"><button onClick={onBack} aria-label="Go back" title="Go back" className="touch-target bg-black/40 backdrop-blur-md border border-white/10 w-12 h-12 rounded-full text-white flex items-center justify-center hover:bg-white/20 transition-colors"><BackIcon className="w-6 h-6" /></button></div>
                  <div className="absolute inset-0 bg-cover bg-center transition-all duration-700" style={{ backgroundImage: `url(${getOptimizedImageUrl(movie.cover || movie.thumbnail, 1280) || IMAGE_FALLBACK})` }}></div>
                 <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/40 to-transparent"></div>
                 <div className="absolute bottom-0 left-0 w-full p-[4%] flex flex-col md:flex-row items-end gap-6">
@@ -699,7 +704,7 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                             </div>
                         </div>
                     )}
-                    {isSeries && (
+                     {isSeries && hasSeasons && (
                         <div className="space-y-4">
                             <div className="flex items-center justify-between"><h3 className="text-xl font-bold text-white flex items-center gap-2"><EpisodeIcon className="w-5 h-5 text-primary" /> Episodes</h3></div>
                             {showSeasons && <div className="flex gap-2 flex-wrap mb-4">{movie.seasons!.map(season => (<button key={season.seasonNumber} onClick={() => setSelectedSeason(season.seasonNumber)} className={`px-4 py-2 rounded-full text-sm font-bold ${selectedSeason === season.seasonNumber ? 'bg-primary text-black' : 'bg-white/10 text-white hover:bg-white/20'}`}>Season {season.seasonNumber}</button>))}</div>}
@@ -732,12 +737,6 @@ const DetailsView: React.FC<{ movie: MovieResult, onBack: () => void,
                                     })}
                                 </div>
                             )}
-                            {!showSeasons && <div className="text-center py-8 text-gray-400 bg-white/5 rounded-xl border border-white/10">
-                                <p className="mb-4">No season information available.</p>
-                                <button onClick={() => onFetchSources(movie.title, 1, 1, movie.subjectId, movie.detailPath)} disabled={loading} className="bg-primary text-black font-bold py-2 px-6 rounded-full hover:bg-white transition-all">
-                                    {loading ? 'Loading...' : 'Play Now'}
-                                </button>
-                            </div>}
                         </div>
                     )}
                 </div>
@@ -1587,39 +1586,39 @@ const App: React.FC = () => {
                  <div className="fixed bottom-0 left-0 w-full flex justify-center z-50 pointer-events-none px-2 pb-safe lg:hidden">
                     <div className="pointer-events-auto">
                         <Dock magnification={50} distance={80} panelHeight={52} className="bg-[#121212]/95 border-white/15 shadow-[0_10px_35px_rgba(0,0,0,0.85)]">
-                            <DockItem onClick={() => { setCurrentView("home"); window.history.pushState({}, "", "/"); resetToHomeSEO(); }}>
+                             <DockItem ariaLabel="Home" onClick={() => { setCurrentView("home"); window.history.pushState({}, "", "/"); resetToHomeSEO(); }}>
                                 <DockLabel>Home</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-house text-xl ${currentView === "home" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => handleLiveTvClick()}>
+                             <DockItem ariaLabel="Live TV" onClick={() => handleLiveTvClick()}>
                                 <DockLabel>Live TV</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-satellite-dish text-xl ${currentView === "live-tv" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => { setCurrentView("news"); window.history.pushState({}, "", "/news"); }}>
+                             <DockItem ariaLabel="News" onClick={() => { setCurrentView("news"); window.history.pushState({}, "", "/news"); }}>
                                 <DockLabel>News</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-newspaper text-xl ${currentView === "news" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => handleAnimeClick()}>
+                             <DockItem ariaLabel="Anime" onClick={() => handleAnimeClick()}>
                                 <DockLabel>Anime</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-tv text-xl ${currentView === "anime" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => handleNovelsClick()}>
+                             <DockItem ariaLabel="Novels" onClick={() => handleNovelsClick()}>
                                 <DockLabel>Novels</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-book-open text-xl ${currentView === "novels" ? "text-cyan-400 drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => handleWatchPartyClick()}>
+                             <DockItem ariaLabel="Watch Party" onClick={() => handleWatchPartyClick()}>
                                 <DockLabel>Watch Party</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-users-viewfinder text-xl ${currentView === "watch-party" ? "text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => handleTrendingClick()}>
+                             <DockItem ariaLabel="Trending" onClick={() => handleTrendingClick()}>
                                 <DockLabel>Trending</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-fire text-xl ${currentView === "trending" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => { setCurrentView("adult"); window.history.pushState({}, "", "/adult"); }}>
+                             <DockItem ariaLabel="Adult titles" onClick={() => { setCurrentView("adult"); window.history.pushState({}, "", "/adult"); }}>
                                 <DockLabel>+18 Hot</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-shield-cat text-xl ${currentView === "adult" ? "text-fuchsia-400 drop-shadow-[0_0_8px_rgba(244,10,240,0.8)]" : "text-fuchsia-500/60"}`}></i></DockIcon>
                             </DockItem>
-                            <DockItem onClick={() => setIsSearchOpen(true)}>
+                             <DockItem ariaLabel="Search" onClick={() => setIsSearchOpen(true)}>
                                 <DockLabel>Search</DockLabel>
                                 <DockIcon><i className="fa-solid fa-search text-xl text-gray-400"></i></DockIcon>
                             </DockItem>

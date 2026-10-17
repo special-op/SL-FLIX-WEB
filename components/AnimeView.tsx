@@ -7,6 +7,11 @@ import { motion } from 'motion/react';
 import AnimeThreeCanvas from './AnimeThreeCanvas';
 import AnimeDetailView from './AnimeDetailView';
 
+const stripAnimeTags = (value: string = '') => value
+  .replace(/\s*\[[^\]]*\]\s*/g, ' ')
+  .replace(/\s{2,}/g, ' ')
+  .trim();
+
 interface AnimeViewProps {
   onBack: () => void;
   onPlayStream?: (title: string, sources: any[], poster: string) => void;
@@ -346,7 +351,7 @@ const AnimeCard: React.FC<{ item: AnimeItem; onClick: () => void }> = ({ item, o
       </div>
       <div className="p-3 flex-1 flex flex-col justify-between">
         <h3 className="text-xs font-bold text-white line-clamp-2 group-hover:text-primary transition-colors leading-snug">
-          {item.title}
+                     {stripAnimeTags(item.title)}
         </h3>
         <div className="flex items-center justify-between mt-2 pt-2 border-t border-white/5 text-[10px] text-gray-400">
           <span className="flex items-center gap-1 text-primary font-bold">
