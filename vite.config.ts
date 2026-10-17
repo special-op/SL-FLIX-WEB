@@ -66,7 +66,7 @@ export default defineConfig(async ({ mode, command }): Promise<UserConfig> => {
               options: {
                 cacheName: 'google-fonts-cache',
                 expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
-                cacheableResponse: { statuses: [0, 200] }
+                cacheableResponse: { statuses: [200] }
               }
             },
             {
@@ -75,21 +75,7 @@ export default defineConfig(async ({ mode, command }): Promise<UserConfig> => {
               options: {
                 cacheName: 'gstatic-fonts-cache',
                 expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
-                cacheableResponse: { statuses: [0, 200] }
-              }
-            },
-            {
-              urlPattern: /\/api\/(tv|home|movies|series|search|metadata|cineverse|omegatech).*/i,
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'api-metadata-cache',
-                expiration: {
-                  maxEntries: 150,
-                  maxAgeSeconds: 60 * 60 * 24 * 7
-                },
-                cacheableResponse: {
-                  statuses: [0, 200]
-                }
+                cacheableResponse: { statuses: [200] }
               }
             },
             {
@@ -102,10 +88,25 @@ export default defineConfig(async ({ mode, command }): Promise<UserConfig> => {
                   maxAgeSeconds: 60 * 60 * 24 * 14
                 },
                 cacheableResponse: {
-                  statuses: [0, 200]
+                  statuses: [200]
                 }
               }
-            }
+            },
+            {
+              urlPattern: /\/api\/(tv|home|movies|series|search|metadata|cineverse|omegatech).*/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'api-metadata-cache',
+                networkTimeoutSeconds: 10,
+                expiration: {
+                  maxEntries: 150,
+                  maxAgeSeconds: 60 * 60 * 24 * 7
+                },
+                cacheableResponse: {
+                  statuses: [200]
+                }
+              }
+            },
           ]
         },
         devOptions: {

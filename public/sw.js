@@ -111,7 +111,10 @@ async function cacheFirst(request, cacheName, maxAge) {
   const cache = await caches.open(cacheName);
   const cachedResponse = await cache.match(request);
   
-  if (cachedResponse) {
+  if (cachedResponse && !isCacheableResponse(cachedResponse)) {
+    await cache.delete(request);
+  }
+  if (cachedResponse && isCacheableResponse(cachedResponse)) {
     // Check if cache is stale
     const dateHeader = cachedResponse.headers.get('date');
     if (dateHeader) {
@@ -133,18 +136,18 @@ async function networkFirst(request, cacheName, maxAge) {
   try {
     const networkResponse = await fetch(request);
     
-    if (networkResponse.ok) {
+    if (isCacheableResponse(networkResponse)) {
       const cache = await caches.open(cacheName);
-      cache.put(request, networkResponse.clone());
+      await cache.put(request, networkResponse.clone());
+      return networkResponse;
     }
-    
-    return networkResponse;
+    throw new Error(`Uncacheable response: ${networkResponse.status}`);
   } catch (error) {
     console.log('[SW] Network failed, trying cache:', request.url);
     const cache = await caches.open(cacheName);
     const cachedResponse = await cache.match(request);
     
-    if (cachedResponse) {
+    if (cachedResponse && isCacheableResponse(cachedResponse)) {
       return cachedResponse;
     }
     
@@ -178,17 +181,21 @@ async function fetchAndCache(request, cacheName, maxAge) {
   try {
     const networkResponse = await fetch(request);
     
-    if (networkResponse.ok) {
+    if (isCacheableResponse(networkResponse)) {
       const cache = await caches.open(cacheName);
       const responseToCache = networkResponse.clone();
-      cache.put(request, responseToCache);
+      await cache.put(request, responseToCache);
+      return networkResponse;
     }
-    
-    return networkResponse;
+    throw new Error(`Uncacheable response: ${networkResponse.status}`);
   } catch (error) {
     console.log('[SW] Fetch failed:', request.url, error);
     throw error;
   }
+}
+
+function isCacheableResponse(response) {
+  return Boolean(response && response.ok && response.type !== 'opaque');
 }
 
 // Check if request is for static assets

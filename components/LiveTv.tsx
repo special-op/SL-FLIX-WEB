@@ -6,7 +6,7 @@ import { LazyLoadImage } from 'react-lazy-load-image-component';
 import { 
   Search, Trophy, Calendar, Tv, Play, Info, 
   ChevronRight, LayoutGrid, List, ArrowLeft, 
-  Activity, Clock, Star, Filter, Radio, Volume2, VolumeX
+  Activity, Clock, Star, Filter, Radio, Volume2, VolumeX, RefreshCw
 } from 'lucide-react';
 import Hls from 'hls.js';
 interface LiveTvProps {
@@ -24,6 +24,9 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
   const [currentBannerIndex, setCurrentBannerIndex] = useState(0);
   const [isMuted, setIsMuted] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [sectionErrors, setSectionErrors] = useState({ matches: false, guide: false });
+  const [retryKey, setRetryKey] = useState(0);
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
@@ -95,6 +98,8 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
     }, 1500);
 
     const fetchData = async () => {
+      setLoading(true);
+      setLoadError(false);
       try {
         console.log('[LiveTV] Fetching TV data...');
         const results = await Promise.allSettled([
@@ -107,12 +112,18 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
         ]);
         if (!isMounted) return;
 
-        const channelsRes = results[0].status === 'fulfilled' ? results[0].value : { data: [] };
-        const matchesRes = results[1].status === 'fulfilled' ? results[1].value : { data: [] };
-        const guideRes = results[2].status === 'fulfilled' ? results[2].value : { data: [] };
-        const onNowRes = results[3].status === 'fulfilled' ? results[3].value : { data: [] };
-        const homeRes = results[4].status === 'fulfilled' ? results[4].value : { data: null };
-        const legacyRes = results[5].status === 'fulfilled' ? results[5].value : [];
+        const channelsRes = results[0].status === 'fulfilled' ? results[0].value : { data: [], error: true };
+        const matchesRes = results[1].status === 'fulfilled' ? results[1].value : { data: [], error: true };
+        const guideRes = results[2].status === 'fulfilled' ? results[2].value : { data: [], error: true };
+        const onNowRes = results[3].status === 'fulfilled' ? results[3].value : { data: [], error: true };
+        const homeRes = results[4].status === 'fulfilled' ? results[4].value : { data: null, error: true };
+        const legacyRes = results[5].status === 'fulfilled' ? results[5].value : Object.assign([], { error: true });
+        const channelsFailed = Boolean((channelsRes as any)?.error) && Boolean((legacyRes as any)?.error);
+        setLoadError(channelsFailed);
+        setSectionErrors({
+          matches: Boolean((matchesRes as any)?.error),
+          guide: Boolean((guideRes as any)?.error)
+        });
 
         let channelList = Array.isArray(channelsRes.data) ? channelsRes.data : (Array.isArray(channelsRes) ? channelsRes : []);
         const legacyList = Array.isArray(legacyRes) ? legacyRes.map(c => ({
@@ -155,7 +166,7 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
       isMounted = false;
       clearTimeout(timer);
     };
-  }, []);
+  }, [retryKey]);
   const categories = useMemo(() => {
     const cats = new Set<string>(['All']);
     channels.forEach((ch: any) => {
@@ -484,7 +495,16 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
                   <h2 className="text-2xl font-black tracking-tight uppercase">{selectedCategory} Universe</h2>
                   <div className="text-gray-500 font-mono text-xs">{filteredChannels.length} STATIONS ONLINE</div>
                 </div>
-                {loading && filteredChannels.length === 0 ? (
+                {loadError && !loading ? (
+                  <div role="alert" className="rounded-3xl border border-red-500/30 bg-red-950/20 p-10 text-center">
+                    <Radio className="mx-auto mb-4 text-red-400" size={38} />
+                    <h3 className="text-lg font-black uppercase tracking-tight">Live TV is temporarily unavailable</h3>
+                    <p className="mt-2 text-sm text-gray-400">The channel service did not respond. Your filters and cached data are unchanged.</p>
+                    <button type="button" onClick={() => setRetryKey(value => value + 1)} className="mt-6 inline-flex items-center gap-2 rounded-xl bg-primary px-5 py-3 text-sm font-black text-black hover:bg-white transition-colors">
+                      <RefreshCw size={16} /> Retry channels
+                    </button>
+                  </div>
+                ) : loading && filteredChannels.length === 0 ? (
                   <div className="grid gap-6 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
                     {Array.from({ length: 12 }).map((_, i) => (
                       <div key={i} className="bg-white/5 border border-white/5 rounded-[2rem] p-4 space-y-3 animate-pulse">
@@ -612,6 +632,14 @@ const LiveTv: React.FC<LiveTvProps> = ({ onBack, onPlay, initialTab = 'channels'
                 </section>
               )}
               {}
+              {liveMatches.length === 0 && upcomingMatches.length === 0 && (
+                <div role={sectionErrors.matches ? 'alert' : undefined} className="rounded-3xl border border-dashed border-white/10 bg-white/5 p-10 text-center">
+                  <Trophy className="mx-auto mb-4 text-gray-700" size={38} />
+                  <h3 className="text-lg font-black uppercase tracking-tight">{sectionErrors.matches ? 'Sports data unavailable' : 'No fixtures right now'}</h3>
+                  <p className="mt-2 text-sm text-gray-500">{sectionErrors.matches ? 'The sports service did not respond.' : 'There are no live or upcoming fixtures in this feed.'}</p>
+                  {sectionErrors.matches && <button type="button" onClick={() => setRetryKey(value => value + 1)} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2 text-xs font-black text-black"><RefreshCw size={14} /> Retry sports</button>}
+                </div>
+              )}
               <div className="grid lg:grid-cols-3 gap-8">
                  {}
                  <div className="lg:col-span-1 space-y-6">

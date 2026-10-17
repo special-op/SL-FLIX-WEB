@@ -71,7 +71,7 @@ async function fetchExternal(url, options = {}, attempt = 1) {
         const res = await fetch(url, { 
             ...options, 
             headers,
-            signal: AbortSignal.timeout(30000) 
+            signal: AbortSignal.timeout(10000) 
         });
         const text = await res.text();
         let data;

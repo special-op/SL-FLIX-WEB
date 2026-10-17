@@ -46,10 +46,12 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
   const [favorites, setFavorites] = useState<string[]>([]);
   const [qualityLabel, setQualityLabel] = useState('1080p60 HD');
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamAttempt, setStreamAttempt] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerContainerRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const streamTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Load Favorites from LocalStorage
   useEffect(() => {
@@ -82,6 +84,19 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
     return currentChannel.stream_url || currentChannel.url || '';
   };
 
+  const streamCount = Array.isArray((currentChannel as any).streams) ? (currentChannel as any).streams.length : 1;
+  const retryStream = () => {
+    setStreamError(null);
+    setIsSignalLocking(true);
+    setStreamAttempt(value => value + 1);
+  };
+  const switchToNextStream = () => {
+    if (streamCount < 2 || selectedStreamIndex >= streamCount - 1) return;
+    setSelectedStreamIndex(index => index + 1);
+    setStreamError(null);
+    setIsSignalLocking(true);
+  };
+
   // Sync / Load Video
   useEffect(() => {
     const rawUrl = getActiveStreamUrl();
@@ -94,6 +109,7 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
     setIsSignalLocking(true);
     setIsBuffering(false);
     setStreamError(null);
+    if (streamTimeoutRef.current) clearTimeout(streamTimeoutRef.current);
 
     const video = videoRef.current;
     if (hlsRef.current) {
@@ -111,16 +127,27 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
     const handleWaiting = () => setIsBuffering(true);
     const handlePlaying = () => {
       setIsBuffering(false);
+      if (streamTimeoutRef.current) clearTimeout(streamTimeoutRef.current);
       setIsSignalLocking(false);
       setIsPlaying(true);
     };
     const handleCanPlay = () => setIsBuffering(false);
     const handleStalled = () => setIsBuffering(true);
+    const handleMediaError = () => {
+      setStreamError('Stream source unavailable or format unsupported');
+      setIsSignalLocking(false);
+    };
+    streamTimeoutRef.current = setTimeout(() => {
+      setStreamError('Stream connection timed out. Retry or switch to the next mirror.');
+      setIsSignalLocking(false);
+      setIsBuffering(false);
+    }, 10_000);
 
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('playing', handlePlaying);
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('stalled', handleStalled);
+    video.addEventListener('error', handleMediaError);
 
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = activeUrl;
@@ -194,12 +221,17 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
       video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('stalled', handleStalled);
+      video.removeEventListener('error', handleMediaError);
+      if (streamTimeoutRef.current) {
+        clearTimeout(streamTimeoutRef.current);
+        streamTimeoutRef.current = null;
+      }
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
       }
     };
-  }, [currentChannel, selectedStreamIndex]);
+  }, [currentChannel, selectedStreamIndex, streamAttempt]);
 
   // Channel Surfing Logic (CH- / CH+)
   const currentIndex = allChannels.findIndex(c => c.id === currentChannel.id);
@@ -500,7 +532,7 @@ export const LiveTvStreamPlayer: React.FC<LiveTvStreamPlayerProps> = ({
 
           <div className="text-center px-3">
             <div className="text-[10px] text-gray-500 font-mono">CHANNEL</div>
-            <div className="text-xs font-bold text-primary font-mono">{currentIndex + 1} / {allChannels.length || 1}</div>
+            <div className="text-xs font-bold text-primary font-mono">{allChannels.length ? Math.max(currentIndex + 1, 1) : 0} / {allChannels.length}</div>
           </div>
 
           <button 

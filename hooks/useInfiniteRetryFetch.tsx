@@ -122,7 +122,7 @@ export async function fetchWithInfiniteRetry<T>(
   while (retryCount <= maxRetries) {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
       const response = await fetch(url, {
         ...options,
         signal: controller.signal

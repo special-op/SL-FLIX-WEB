@@ -36,7 +36,7 @@ export const parseSrt = (data: string): SrtCue[] => {
 
 export const fetchAndParseSrt = async (url: string): Promise<SrtCue[]> => {
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     if (!response.ok) throw new Error('SRT fetch failed');
     const text = await response.text();
     return parseSrt(text);

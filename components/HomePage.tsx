@@ -5,6 +5,7 @@ import MovieCard from './MovieCard';
 import Loader from './Loader';
 import { ChevronRightIcon } from './Icons';
 import { getOptimizedImageUrl } from '../utils/image';
+import ResilientImage from './ResilientImage';
 
 const IMAGE_FALLBACK = '/icons/slflix.png';
 const prefersReducedMotion = () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -58,7 +59,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
   };
   const rating = m.imdbRating && m.imdbRating !== '0' && m.imdbRating !== 'null' ? m.imdbRating : null;
   return (
-    <div className="min-h-[75vh] md:h-[80vh] relative flex flex-col bg-[#0a0a15] overflow-hidden group">
+    <div className="hero-shell min-h-[75vh] md:h-[80vh] relative flex flex-col bg-[#0a0a15] overflow-hidden group">
       <div className="absolute inset-0">
         {movies.map((movie, idx) => {
           const bgImg = movie.cover || movie.thumbnail || (movie as any).posterUrl;
@@ -73,7 +74,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
       </div>
       <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/90 to-transparent"></div>
       <div className="absolute inset-0 bg-gradient-to-r from-[#0a0a15] via-[#0a0a15]/95 to-transparent/30"></div>
-       <div className="relative z-10 flex flex-1 items-center px-[4%] md:px-[6%] py-8 pb-10 md:py-0 md:pb-0 w-full max-w-7xl mx-auto flex-col md:flex-row justify-between gap-6 md:gap-16 mt-8 md:mt-0">
+       <div className="hero-content relative z-10 flex flex-1 items-center px-[4%] md:px-[6%] py-8 pb-10 md:py-0 md:pb-0 w-full max-w-7xl mx-auto flex-col md:flex-row justify-between gap-6 md:gap-16 mt-8 md:mt-0">
         <div className={`flex-1 transition-all duration-700 w-full ${isTransitioning ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'}`}>
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <span className="text-white font-bold text-[10px] md:text-xs tracking-[0.2em] uppercase px-3 py-1 bg-white/10 backdrop-blur-md rounded-sm border border-white/10">
@@ -115,18 +116,19 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
             </button>
           </div>
         </div>
-        <div className={`hidden md:block w-[280px] lg:w-[340px] flex-shrink-0 transition-all duration-700 delay-100 ${isTransitioning ? 'opacity-0 translate-x-8 scale-95' : 'opacity-100 translate-x-0 scale-100'}`}>
+         <div className={`block w-36 sm:w-48 md:w-[280px] lg:w-[340px] mx-auto md:mx-0 flex-shrink-0 transition-all duration-700 delay-100 ${isTransitioning ? 'opacity-0 translate-x-8 scale-95' : 'opacity-100 translate-x-0 scale-100'}`}>
            <div 
              className="w-full aspect-[2/3] rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.8)] border border-white/10 relative cursor-pointer group"
              onClick={() => onPlay(m)}
            >
-               <img
+               <ResilientImage
                  src={getOptimizedImageUrl(m.cover || m.thumbnail || (m as any).posterUrl, 600) || IMAGE_FALLBACK}
-                 onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }}
+                 fallbackSrc={IMAGE_FALLBACK}
                  alt={m.title}
                  width={600}
                  height={900}
-                 loading="lazy"
+                 loading="eager"
+                 fetchPriority="high"
                  decoding="async"
                  className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
                />
@@ -139,22 +141,26 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
            </div>
         </div>
       </div>
-      {movies.length > 1 && (
-          <div className="relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[92%] md:max-w-[70%] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mx-0 md:mb-0 md:absolute md:bottom-6 md:right-[6%] md:w-auto">
-           {movies.map((movie, idx) => (
+      {movies.filter(movie => Boolean(movie.cover || movie.thumbnail || (movie as any).posterUrl)).length > 1 && (
+          <div className="hero-thumbnail-strip relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[92%] md:max-w-[70%] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mx-0 md:mb-0 md:absolute md:bottom-6 md:right-[6%] md:w-auto">
+           {movies.map((movie, idx) => {
+             const thumbnail = movie.cover || movie.thumbnail || (movie as any).posterUrl;
+             if (!thumbnail) return null;
+             return (
              <button
                key={idx}
                onClick={() => goToSlide(idx)}
                className={`relative w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
              >
-               <img src={getOptimizedImageUrl(movie.cover || movie.thumbnail || (movie as any).posterUrl, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={movie.title} width={100} height={150} loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading="lazy" decoding="async" className="w-full h-full object-cover" />
               {idx === currentIndex && (
                 <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
                   <div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div>
                 </div>
               )}
-            </button>
-          ))}
+             </button>
+             );
+           })}
         </div>
       )}
     </div>
@@ -427,7 +433,7 @@ const HomePage: React.FC<{
           </div>
 
           <div className="relative group">
-             <div className="flex items-center gap-2 md:gap-3 overflow-x-auto scrollbar-hide py-1 scroll-smooth scroll-snap-x">
+              <div className="flex items-center gap-2 md:gap-3 overflow-x-auto scrollbar-hide py-1 scroll-smooth scroll-snap-x" role="group" aria-label="Genre filters">
               {availableGenrePills.map((genre) => {
                 const isActive = selectedGenre.toLowerCase() === genre.id.toLowerCase();
                 return (
@@ -442,6 +448,7 @@ const HomePage: React.FC<{
                         window.scrollTo({ top: y, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
                       }
                     }}
+                     aria-pressed={isActive}
                      className={`touch-target flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs md:text-sm font-bold whitespace-nowrap transition-all duration-300 cursor-pointer flex-shrink-0 scroll-snap-item ${
                       isActive
                         ? 'bg-primary text-black shadow-[0_0_20px_rgba(0,229,255,0.4)] scale-105'

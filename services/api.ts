@@ -3,6 +3,20 @@ import { cacheService, CacheService } from './cache';
 import { safeConsole } from '../utils/productionGuard';
 const VIRTUAL_API_PATH = "/slflix/api/v1";
 const vttBlobCache = new Map<string, string>();
+const SHARED_FETCH_TIMEOUT_MS = 10_000;
+
+async function fetchWithTimeout(input: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), SHARED_FETCH_TIMEOUT_MS);
+    const abortFromCaller = () => controller.abort();
+    options.signal?.addEventListener('abort', abortFromCaller, { once: true });
+    try {
+        return await fetch(input, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timeoutId);
+        options.signal?.removeEventListener('abort', abortFromCaller);
+    }
+}
 async function fetchWithRetry<T>(
     fetchFn: () => Promise<T>,
     retries: number = 10,
@@ -31,7 +45,7 @@ async function fetchJson(url: string, options: RequestInit = {}) {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
     };
-    const res = await fetch(url, { ...options, headers: { ...baseHeaders, ...options.headers } });
+    const res = await fetchWithTimeout(url, { ...options, headers: { ...baseHeaders, ...options.headers } });
         if (!res.ok) {
         const err = new Error(`HTTP Error: ${res.status}`);
         (err as any).status = res.status;
@@ -480,7 +494,7 @@ export const ApiService = {
         try {
             return await fetchJson('/api/tv/home');
         } catch (e) {
-            return { data: null };
+            return { data: null, error: true };
         }
     },
     getTvChannels: async (params: { cat?: string; country?: string; q?: string; offset?: number; limit?: number } = {}): Promise<any> => {
@@ -493,21 +507,21 @@ export const ApiService = {
             if (params.limit !== undefined) query.set('limit', String(params.limit));
             return await fetchJson(`/api/tv/channels?${query.toString()}`);
         } catch (e) {
-            return { data: [], total: 0 };
+            return { data: [], total: 0, error: true };
         }
     },
     getTvCategories: async (): Promise<any> => {
         try {
             return await fetchJson('/api/tv/categories');
         } catch (e) {
-            return { data: [] };
+            return { data: [], error: true };
         }
     },
     getTvCountries: async (): Promise<any> => {
         try {
             return await fetchJson('/api/tv/countries');
         } catch (e) {
-            return { data: [] };
+            return { data: [], error: true };
         }
     },
     getTvGuide: async (date?: string): Promise<any> => {
@@ -515,14 +529,14 @@ export const ApiService = {
             const query = date ? `?date=${encodeURIComponent(date)}` : '';
             return await fetchJson(`/api/tv/guide${query}`);
         } catch (e) {
-            return { data: [] };
+            return { data: [], error: true };
         }
     },
     getTvOnNow: async (): Promise<any> => {
         try {
             return await fetchJson('/api/tv/onnow');
         } catch (e) {
-            return { data: [] };
+            return { data: [], error: true };
         }
     },
     getTvMatches: async (season?: string): Promise<any> => {
@@ -530,7 +544,7 @@ export const ApiService = {
             const query = season ? `?season=${encodeURIComponent(season)}` : '';
             return await fetchJson(`/api/tv/matches${query}`);
         } catch (e) {
-            return { data: [] };
+            return { data: [], error: true };
         }
     },
     getLegacyLiveTv: async (): Promise<any> => {
@@ -538,7 +552,9 @@ export const ApiService = {
             const res = await fetchJson('/api/tv/channels?limit=100');
             return res.data || [];
         } catch (e) {
-            return [];
+            const failed: any[] & { error?: boolean } = [];
+            failed.error = true;
+            return failed;
         }
     },
     getLiveChannels: async (): Promise<LiveChannel[]> => {
@@ -622,7 +638,7 @@ export const ApiService = {
             const clean = query.replace(/[^\w\s]/g, '').trim();
             if (clean.length < 2) return [];
             const url = `https://v3.sg.media-imdb.com/suggestion/${clean.charAt(0).toLowerCase()}/${encodeURIComponent(clean)}.json`;
-            const res = await fetch(url);
+            const res = await fetchWithTimeout(url);
             const data = await res.json();
             return data?.d || [];
         } catch (e) { return []; }
@@ -637,7 +653,7 @@ export const ApiService = {
             return cached.data;
         }
         try {
-            const res = await fetch(`/api/sport/trend?page=${page}`);
+            const res = await fetchWithTimeout(`/api/sport/trend?page=${page}`);
             if (!res.ok) throw new Error("API not found");
             const data = await res.json();
             cacheService.set(cacheKey, data, 5 * 60 * 1000); 
@@ -748,7 +764,7 @@ export const ApiService = {
             } else {
                 // Direct Omegatech fallback (Oploverz Indonesian Sub)
                 try {
-                    const directRes = await fetch('https://api.omegatech.app/api/Anime/Oploverz?action=home');
+                    const directRes = await fetchWithTimeout('https://api.omegatech.app/api/Anime/Oploverz?action=home');
                     const directJson = await directRes.json();
                     if (directJson && directJson.data) {
                         const raw = [...(directJson.data.trending || []), ...(directJson.data.latestEpisodes || []), ...(directJson.data.featured || [])];
@@ -761,7 +777,7 @@ export const ApiService = {
                         }
                     }
                 } catch (e1) {
-                    const directRes = await fetch('https://api.omegatech.app/api/Anime/Nimegami?action=home');
+                    const directRes = await fetchWithTimeout('https://api.omegatech.app/api/Anime/Nimegami?action=home');
                     const directJson = await directRes.json();
                     if (directJson && directJson.data) items = directJson.data;
                 }
@@ -772,7 +788,7 @@ export const ApiService = {
         } catch (e) {
             console.error('[API] Failed to fetch anime home:', e);
             try {
-                const directRes = await fetch('https://api.omegatech.app/api/Anime/Oploverz?action=home');
+                const directRes = await fetchWithTimeout('https://api.omegatech.app/api/Anime/Oploverz?action=home');
                 const directJson = await directRes.json();
                 if (directJson && directJson.data) {
                     const raw = [...(directJson.data.trending || []), ...(directJson.data.latestEpisodes || [])];
@@ -798,14 +814,14 @@ export const ApiService = {
                 items = data;
             } else {
                 try {
-                    const directRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`);
+                    const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`);
                     const directJson = await directRes.json();
                     const list = directJson.data?.data || directJson.data?.results || [];
                     if (Array.isArray(list)) {
                         items = list.map((it: any) => ({ title: it.title, image: it.poster || it.image, link: it.url || '' }));
                     }
                 } catch (e1) {
-                    const directRes = await fetch(`https://api.omegatech.app/api/Anime/Nimegami?action=search&query=${encodeURIComponent(query)}`);
+                    const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Nimegami?action=search&query=${encodeURIComponent(query)}`);
                     const directJson = await directRes.json();
                     if (directJson && directJson.data) items = directJson.data;
                 }
@@ -816,7 +832,7 @@ export const ApiService = {
         } catch (e) {
             console.error('[API] Failed to search anime:', e);
             try {
-                const directRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`);
+                const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`);
                 const directJson = await directRes.json();
                 const list = directJson.data?.data || directJson.data?.results || [];
                 if (Array.isArray(list)) {
@@ -841,7 +857,7 @@ export const ApiService = {
             // Direct fallback
             try {
                 if (url.includes('oploverz')) {
-                    const directRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=detail&url=${encodeURIComponent(url)}`);
+                    const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Oploverz?action=detail&url=${encodeURIComponent(url)}`);
                     const directJson = await directRes.json();
                     if (directJson && directJson.data) {
                         const d = directJson.data;
@@ -857,7 +873,7 @@ export const ApiService = {
                     }
                 }
             } catch (e1) {}
-            const directRes = await fetch(`https://api.omegatech.app/api/Anime/Nimegami?action=detail&url=${encodeURIComponent(url)}`);
+            const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Nimegami?action=detail&url=${encodeURIComponent(url)}`);
             const directJson = await directRes.json();
             if (directJson && directJson.data) {
                 cacheService.set(cacheKey, directJson.data, 30 * 60 * 1000);
@@ -867,7 +883,7 @@ export const ApiService = {
         } catch (e) {
             console.error('[API] Failed to fetch anime detail:', e);
             try {
-                const directRes = await fetch(`https://api.omegatech.app/api/Anime/Nimegami?action=detail&url=${encodeURIComponent(url)}`);
+                const directRes = await fetchWithTimeout(`https://api.omegatech.app/api/Anime/Nimegami?action=detail&url=${encodeURIComponent(url)}`);
                 const directJson = await directRes.json();
                 if (directJson && directJson.data) return directJson.data;
             } catch (err) {}

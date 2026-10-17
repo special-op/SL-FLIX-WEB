@@ -1,8 +1,7 @@
 import React from 'react';
-import { LazyLoadImage } from 'react-lazy-load-image-component';
-import 'react-lazy-load-image-component/src/effects/blur.css';
 import { MovieResult } from '../types';
 import { getOptimizedImageUrl } from '../utils/image';
+import ResilientImage from './ResilientImage';
 
 const IMAGE_FALLBACK = '/icons/slflix.png';
 interface MovieCardProps {
@@ -30,22 +29,15 @@ const MovieCard: React.FC<MovieCardProps> = ({ movie, onClick, progress }) => {
             className="w-full cursor-pointer relative transition-all duration-300 hover:scale-[1.02] hover:z-10 group flex flex-col h-full text-left bg-transparent border-0 p-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-[#0a0a0a]"
         >
             <div className="w-full aspect-[2/3] rounded-xl overflow-hidden border border-white/5 transition-all duration-300 group-hover:border-primary group-hover:shadow-[0_8px_30px_rgb(0,0,0,0.5)] group-hover:shadow-primary/20 relative bg-[#111]">
-                <LazyLoadImage 
+                <ResilientImage
                     src={getOptimizedImageUrl(movie.cover || movie.thumbnail, 300) || IMAGE_FALLBACK}
+                    fallbackSrc={IMAGE_FALLBACK}
                     alt={movie.title}
                     width={300}
                     height={450}
                     loading="lazy"
-                    effect="blur"
+                    decoding="async"
                     className="w-full h-full object-cover object-center"
-                    wrapperClassName="w-full h-full"
-                    onError={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        if (target.src !== IMAGE_FALLBACK) {
-                            target.onerror = null;
-                            target.src = IMAGE_FALLBACK;
-                        }
-                    }}
                 />
                 <div className={`absolute top-2 right-2 ${getTypeColor(movie.type)} backdrop-blur-md px-2 py-0.5 rounded text-[10px] font-bold text-white uppercase tracking-wider z-10 shadow-lg`}>
                     {movie.type || 'Unknown'}
