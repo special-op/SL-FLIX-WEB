@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node server.js",
-    "build": "vite build",
-    "lint": "tsc --noEmit",
+    "build": "node node_modules/vite/bin/vite.js build",
+    "lint": "node node_modules/typescript/bin/tsc --noEmit",
     "test": "node --test audit.test.mjs && npm run lint && npm run build",
     "preview": "vite preview",
     "start": "node server.js",

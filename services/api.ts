@@ -4,7 +4,6 @@ import { safeConsole } from '../utils/productionGuard';
 const VIRTUAL_API_PATH = "/slflix/api/v1";
 const vttBlobCache = new Map<string, string>();
 const SHARED_FETCH_TIMEOUT_MS = 10_000;
-
 async function fetchWithTimeout(input: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), SHARED_FETCH_TIMEOUT_MS);

@@ -17,6 +17,7 @@ import { formatTime, convertSrtUrlToVttBlob, triggerHaptic } from './utils';
 import { FastStreamLoader } from './FastStreamLoader';
 import { VideoHud } from './VideoHud';
 import { VideoSource } from '../../types';
+import { recordHlsBandwidth, recordHlsStall, useNetworkQuality } from '../../hooks/useNetworkQuality';
 
 // Module-level persistent cache across movie switches so leaving and coming back preserves position
 interface MoviePlaybackSession {
@@ -83,6 +84,8 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
   const [currentTime, setCurrentTime] = useState(effectiveInitialTime);
   const [duration, setDuration] = useState(0);
   const [isBuffering, setIsBuffering] = useState(true);
+  const syncRateResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bufferingChangeRef = useRef<WatchPartyProps['onBufferingChange']>();
   const [buffered, setBuffered] = useState(0);
   const [bufferedRanges, setBufferedRanges] = useState<Array<{ start: number; end: number }>>([]);
   const [showControls, setShowControls] = useState(true);
@@ -104,6 +107,8 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
   const [convertedSubUrls, setConvertedSubUrls] = useState<Record<number, string>>({});
   const [isConvertingSubs, setIsConvertingSubs] = useState(false);
   const [networkState, setNetworkState] = useState<'good' | 'unstable' | 'offline'>('good');
+  const { lowDataMode, quality: connectionQuality } = useNetworkQuality();
+  const [slowStall, setSlowStall] = useState(false);
   const [showNextCountdown, setShowNextCountdown] = useState(false);
   const [countdown, setCountdown] = useState(5);
   const [showReconnected, setShowReconnected] = useState(false);
@@ -115,6 +120,26 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
   const savedTimeRef = useRef<number>(effectiveInitialTime || 0);
   const [isDragging, setIsDragging] = useState(false);
   const wantsToPlayRef = useRef(true);
+
+  useEffect(() => {
+    bufferingChangeRef.current = watchPartyProps?.onBufferingChange;
+  }, [watchPartyProps?.onBufferingChange]);
+
+  useEffect(() => {
+    if (!watchPartyProps || !bufferingChangeRef.current) return;
+    bufferingChangeRef.current(isBuffering);
+  }, [Boolean(watchPartyProps), isBuffering]);
+
+  useEffect(() => {
+    if (!watchPartyProps) return;
+    return () => {
+      bufferingChangeRef.current?.(false);
+    };
+  }, [Boolean(watchPartyProps)]);
+
+  useEffect(() => () => {
+    if (syncRateResetRef.current) clearTimeout(syncRateResetRef.current);
+  }, []);
 
   // Subtitle Overlay Engine
   const [activeCues, setActiveCues] = useState<SrtCue[]>([]);
@@ -425,6 +450,20 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     const video = videoRef.current;
     if (!video) return;
 
+    const restorePlaybackRate = () => {
+      if (syncRateResetRef.current) {
+        clearTimeout(syncRateResetRef.current);
+        syncRateResetRef.current = null;
+      }
+      video.playbackRate = playbackSpeed;
+    };
+
+    // The host is the source of truth. Only viewers correct their local clock.
+    if (watchPartyProps.isHost) {
+      restorePlaybackRate();
+      return;
+    }
+
     if (watchPartyProps.syncPaused !== undefined) {
       if (watchPartyProps.syncPaused) {
         wantsToPlayRef.current = false;
@@ -438,13 +477,36 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     if (typeof watchPartyProps.syncTime === 'number' && watchPartyProps.syncTime >= 0) {
-      const diff = Math.abs(video.currentTime - watchPartyProps.syncTime);
-      if (diff > 2.5) {
-        video.currentTime = watchPartyProps.syncTime;
-        setCurrentTime(watchPartyProps.syncTime);
+      const elapsedSinceSync = !watchPartyProps.syncPaused && typeof watchPartyProps.syncTimestamp === 'number'
+        ? Math.max(0, (Date.now() - watchPartyProps.syncTimestamp) / 1000)
+        : 0;
+      const targetTime = watchPartyProps.syncTime + elapsedSinceSync;
+      const diff = targetTime - video.currentTime;
+      const absoluteDiff = Math.abs(diff);
+
+      if (absoluteDiff > 1.5) {
+        restorePlaybackRate();
+        video.currentTime = targetTime;
+        savedTimeRef.current = targetTime;
+        setCurrentTime(targetTime);
+      } else if (
+        absoluteDiff > 0.15 &&
+        !watchPartyProps.syncPaused &&
+        !video.paused &&
+        !isBuffering &&
+        video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
+        isCurrentTimeBuffered(targetTime)
+      ) {
+        // A small, bounded nudge avoids an audible/visible seek. Return to the
+        // user's selected speed once the correction window has elapsed.
+        if (syncRateResetRef.current) clearTimeout(syncRateResetRef.current);
+        video.playbackRate = Math.max(0.25, Math.min(4, playbackSpeed * (diff > 0 ? 1.05 : 0.95)));
+        syncRateResetRef.current = setTimeout(restorePlaybackRate, Math.min(30000, Math.max(2000, (absoluteDiff / 0.05) * 1000)));
+      } else {
+        restorePlaybackRate();
       }
     }
-  }, [watchPartyProps?.syncPaused, watchPartyProps?.syncTime, watchPartyProps?.syncTimestamp, attemptPlay]);
+  }, [watchPartyProps?.isHost, watchPartyProps?.syncPaused, watchPartyProps?.syncTime, watchPartyProps?.syncTimestamp, attemptPlay, isBuffering, isCurrentTimeBuffered, playbackSpeed]);
 
   const resetControlsTimeout = useCallback(() => {
     if (minimized) return;
@@ -493,8 +555,8 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     if (!hlsRef.current && Hls.isSupported()) {
       const hls = new Hls({
         capLevelToPlayerSize: true,
-        maxBufferLength: 600,        // Buffers up to 10 minutes into the future
-        maxMaxBufferLength: 1200,    // Allows up to 20 minutes forward buffer
+        maxBufferLength: lowDataMode ? 900 : 600,        // Keep more data ahead on slow links
+        maxMaxBufferLength: lowDataMode ? 1800 : 1200,
         maxBufferSize: 500 * 1024 * 1024, // 500 MB in-memory buffer cache
         backBufferLength: 3600,      // Keep 1 hour of backward played video in memory cache
         enableWorker: true,
@@ -524,6 +586,9 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
       };
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (lowDataMode && hls.levels.length > 0) {
+          hls.autoLevelCapping = Math.max(0, hls.levels.length - 2);
+        }
         setIsBuffering(false);
         syncAudioTracks();
         if (videoRef.current) {
@@ -535,6 +600,10 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
 
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
         updateBuffered();
+      });
+
+      hls.on(Hls.Events.FRAG_LOADED, (_, data: any) => {
+        if (data?.stats?.bwEstimate) recordHlsBandwidth(data.stats.bwEstimate);
       });
 
       hls.on(Hls.Events.BUFFER_APPENDED, () => {
@@ -553,7 +622,10 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
         }
       });
       
-      hls.on(Hls.Events.ERROR, (_, data) => { 
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data?.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR || data?.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          recordHlsStall();
+        }
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
           else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
@@ -564,7 +636,13 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     const hls = hlsRef.current;
     if (hls && videoRef.current && hls.media !== videoRef.current) hls.attachMedia(videoRef.current);
     return hls;
-  }, [playbackSpeed, attemptPlay, updateBuffered]);
+  }, [playbackSpeed, attemptPlay, updateBuffered, lowDataMode]);
+
+  useEffect(() => {
+    const hls = hlsRef.current;
+    if (!hls || hls.levels.length === 0) return;
+    hls.autoLevelCapping = lowDataMode ? Math.max(0, hls.levels.length - 2) : -1;
+  }, [lowDataMode]);
 
   const loadSource = useCallback((source: VideoSource, sourceIndex: number) => {
     const video = videoRef.current;
@@ -617,6 +695,31 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, [playbackSpeed, attemptPlay, initHls, currentTime]);
 
+  const retryPlayback = useCallback(() => {
+    setSlowStall(false);
+    setIsBuffering(true);
+    const video = videoRef.current;
+    if (hlsRef.current && video) hlsRef.current.startLoad(video.currentTime);
+    if (wantsToPlayRef.current) attemptPlay();
+  }, [attemptPlay]);
+
+  const lowerQuality = useCallback(() => {
+    const hls = hlsRef.current;
+    if (hls && hls.levels.length > 0) {
+      const current = hls.currentLevel >= 0 ? hls.currentLevel : hls.levels.length - 1;
+      hls.autoLevelCapping = Math.max(0, current - 1);
+      hls.nextLevel = Math.max(0, current - 1);
+      showHudToast('Lower quality enabled', 'fa-solid fa-gauge-low');
+      retryPlayback();
+      return;
+    }
+    const currentSource = sources[activeSourceIndex];
+    const lowerSource = sources
+      .filter(source => Number(source.quality || 0) > 0 && Number(source.quality || 0) < Number(currentSource?.quality || Infinity))
+      .sort((a, b) => Number(b.quality || 0) - Number(a.quality || 0))[0];
+    if (lowerSource) loadSource(lowerSource, sources.indexOf(lowerSource));
+  }, [activeSourceIndex, loadSource, retryPlayback, showHudToast, sources]);
+
   useEffect(() => {
     if (sources.length > 0) {
       let targetIndex = 0;
@@ -664,6 +767,7 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
   // Super-fast background buffering engine: continues pre-fetching segments even when paused
   useEffect(() => {
     if (!hlsRef.current) return;
+    if (lowDataMode) return;
     const hls = hlsRef.current;
     
     if (!playing) {
@@ -694,7 +798,7 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
 
       return () => clearInterval(bgInterval);
     }
-  }, [playing, updateBuffered]);
+  }, [playing, updateBuffered, lowDataMode]);
 
   // Synchronize playback session cache so switching movies and returning restores position instantly
   useEffect(() => {
@@ -974,14 +1078,17 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
         }}
         onWaiting={() => {
           if (!isCurrentTimeBuffered()) {
+            recordHlsStall();
             setIsBuffering(true);
+            setSlowStall(lowDataMode || connectionQuality === 'slow');
           }
         }}
         onSeeked={() => {
           setIsBuffering(false);
+          setSlowStall(false);
           updateBuffered();
         }}
-        onPlaying={() => { setIsBuffering(false); setPlaying(true); }}
+        onPlaying={() => { setIsBuffering(false); setSlowStall(false); setPlaying(true); }}
         onPause={() => setPlaying(false)}
         onEnded={() => {
           if (autoPlayNext && nextEpisode) setShowNextCountdown(true);
@@ -1000,7 +1107,18 @@ export const StreamingPlayer: React.FC<VideoPlayerProps> = ({
       
       {isBuffering && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50 backdrop-blur-xs z-20">
-          <FastStreamLoader buffered={duration > 0 && isFinite(duration) && buffered > 0 && isFinite(buffered) ? (buffered / duration) : undefined} />
+          <div className="flex flex-col items-center gap-3">
+            <FastStreamLoader buffered={duration > 0 && isFinite(duration) && buffered > 0 && isFinite(buffered) ? (buffered / duration) : undefined} />
+            {slowStall && (
+              <div className="rounded-2xl border border-amber-400/40 bg-black/85 px-4 py-3 text-center shadow-2xl">
+                <p className="text-xs font-bold text-amber-100">Buffering, your connection is slow</p>
+                <div className="mt-2 flex items-center justify-center gap-2">
+                  <button type="button" onClick={retryPlayback} className="min-h-11 rounded-xl bg-cyan-400 px-3 text-[11px] font-black text-black">Retry</button>
+                  <button type="button" onClick={lowerQuality} className="min-h-11 rounded-xl border border-amber-300/40 bg-amber-300/15 px-3 text-[11px] font-black text-amber-100">Lower quality</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
