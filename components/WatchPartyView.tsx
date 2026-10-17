@@ -4,6 +4,7 @@ import { ApiService } from '../services/api';
 import { MovieResult, VideoSource, Subtitle, Season } from '../types';
 import VideoPlayer from './VideoPlayer';
 import { getOptimizedImageUrl } from '../utils/image';
+import { useNetworkQuality } from '../hooks/useNetworkQuality';
 
 type RoomEntryMode = 'manual' | 'auto';
 
@@ -46,7 +47,7 @@ interface WatchRoom {
     movie: any;
     currentSeason?: number;
     currentEpisode?: number;
-    users: { id: string; name: string; isCreator: boolean }[];
+    users: { id: string; name: string; isCreator: boolean; buffering?: boolean }[];
     currentTime: number;
     paused: boolean;
     entryMode: RoomEntryMode;
@@ -55,6 +56,19 @@ interface WatchRoom {
     messages?: { id?: string; username: string; message: string; timestamp: number }[];
     kickedUsers?: string[];
     pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
+    guessPosterGame?: GuessPosterGame | null;
+}
+
+interface GuessPosterGame {
+    status: 'active' | 'reveal' | 'finished';
+    round: number;
+    maxRounds: number;
+    startedAt: number;
+    endsAt: number;
+    posterUrl: string;
+    scores: Record<string, number>;
+    revealed: boolean;
+    answerTitle?: string;
 }
 
 export const WatchPartyView: React.FC<{
@@ -62,6 +76,7 @@ export const WatchPartyView: React.FC<{
     onSelectMovieToWatch?: (movie: MovieResult) => void;
 }> = ({ onBack }) => {
     const [socket, setSocket] = useState<any>(null);
+    useNetworkQuality(socket || undefined);
     const [isReconnecting, setIsReconnecting] = useState(false);
     const [activeRooms, setActiveRooms] = useState<WatchRoom[]>([]);
     const [currentRoom, setCurrentRoom] = useState<WatchRoom | null>(null);
@@ -124,6 +139,16 @@ export const WatchPartyView: React.FC<{
     const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
     const [loadingStream, setLoadingStream] = useState<boolean>(false);
     const [streamError, setStreamError] = useState<string | null>(null);
+    const [guessPosterGame, setGuessPosterGame] = useState<GuessPosterGame | null>(null);
+    const [guessInput, setGuessInput] = useState('');
+    const [gameNow, setGameNow] = useState(() => Date.now());
+    const [gameNotice, setGameNotice] = useState<string | null>(null);
+    const offlineChatQueueRef = useRef<{ message: string; queuedAt: number }[]>([]);
+    useEffect(() => {
+        if (!guessPosterGame || guessPosterGame.status !== 'active') return;
+        const timer = window.setInterval(() => setGameNow(Date.now()), 250);
+        return () => window.clearInterval(timer);
+    }, [guessPosterGame?.status, guessPosterGame?.endsAt]);
 
     // Initialize Socket
     useEffect(() => {
@@ -139,6 +164,7 @@ export const WatchPartyView: React.FC<{
                 s.emit('join_room', {
                     roomId: activeRoom.roomId,
                     username: usernameRef.current,
+                    reconnect: true,
                     hostToken: activeRoom.hostToken || localStorage.getItem(`slflix_host_token_${activeRoom.roomId}`) || undefined
                 });
             } else {
@@ -155,6 +181,7 @@ export const WatchPartyView: React.FC<{
         s.on('room_state', (room: WatchRoom) => {
             setWaitExpiresAt(room.waitExpiresAt ?? null);
             setCurrentRoom(room);
+            setGuessPosterGame(room.guessPosterGame || null);
             if (room.hostToken) {
                 try {
                     localStorage.setItem(`slflix_host_token_${room.roomId}`, room.hostToken);
@@ -192,9 +219,15 @@ export const WatchPartyView: React.FC<{
                 if (room.currentSeason) setSelectedSeason(room.currentSeason);
                 if (room.currentEpisode) setSelectedEpisode(room.currentEpisode);
             }
+            const queued = offlineChatQueueRef.current.splice(0, 20);
+            queued.forEach(item => s.emit('room_chat', { roomId: room.roomId, username: usernameRef.current, message: item.message }));
         });
 
-        s.on('disconnect', () => setIsReconnecting(true));
+        s.on('disconnect', () => {
+            setIsReconnecting(true);
+            setPauseNotice('Reconnecting...');
+            setCurrentRoom(prev => prev ? { ...prev, paused: true } : null);
+        });
         s.on('connect_error', () => setIsReconnecting(true));
 
         s.on('room_request_pending', () => setJoinRequestState('pending'));
@@ -229,6 +262,19 @@ export const WatchPartyView: React.FC<{
         s.on('room_user_left', (data: { username: string; usersCount: number; users?: any[] }) => {
             if (data.users) {
                 setCurrentRoom(prev => prev ? { ...prev, users: data.users || prev.users } : null);
+            }
+        });
+
+        s.on('room_buffering_status', (data: { username: string; buffering: boolean; users?: WatchRoom['users'] }) => {
+            if (data.users) {
+                setCurrentRoom(prev => prev ? { ...prev, users: data.users || prev.users } : null);
+            } else {
+                setCurrentRoom(prev => prev ? {
+                    ...prev,
+                    users: prev.users.map(user => user.name.toLowerCase() === data.username.toLowerCase()
+                        ? { ...user, buffering: data.buffering }
+                        : user)
+                } : null);
             }
         });
 
@@ -272,6 +318,7 @@ export const WatchPartyView: React.FC<{
                 setSources([]);
                 setSubtitles([]);
                 setChatMessages([]);
+                setGuessPosterGame(null);
                 setPauseNotice(null);
                 window.history.pushState({}, '', '/watch-party');
                 s.emit('get_active_rooms');
@@ -283,14 +330,15 @@ export const WatchPartyView: React.FC<{
             setTimeout(() => setPauseNotice(null), 3500);
         });
 
-        s.on('room_sync', (data: { action: string; currentTime: number; paused: boolean; movie: any; season?: number; episode?: number; username: string }) => {
-            setCurrentRoom(prev => prev ? { 
-                ...prev, 
-                currentTime: data.currentTime !== undefined ? data.currentTime : prev.currentTime, 
-                paused: data.paused !== undefined ? data.paused : prev.paused, 
+        s.on('room_sync', (data: { action: string; currentTime: number; paused: boolean; movie: any; season?: number; episode?: number; username: string; users?: WatchRoom['users'] }) => {
+            setCurrentRoom(prev => prev ? {
+                ...prev,
+                currentTime: data.currentTime !== undefined ? data.currentTime : prev.currentTime,
+                paused: data.paused !== undefined ? data.paused : prev.paused,
                 movie: data.movie || prev.movie,
                 currentSeason: data.season || prev.currentSeason,
-                currentEpisode: data.episode || prev.currentEpisode
+                currentEpisode: data.episode || prev.currentEpisode,
+                users: data.users || prev.users
             } : null);
             setRoomSyncTimestamp(Date.now());
 
@@ -312,6 +360,29 @@ export const WatchPartyView: React.FC<{
                 setPauseNotice(`Resumed by ${data.username}`);
                 setTimeout(() => setPauseNotice(null), 2500);
             }
+        });
+
+        s.on('guess_poster_started', (data: { game: GuessPosterGame }) => {
+            setGuessPosterGame(data.game);
+            setGuessInput('');
+            setGameNotice(null);
+        });
+        s.on('guess_poster_correct', (data: { username: string; points: number; scores: Record<string, number> }) => {
+            setGuessPosterGame(prev => prev ? { ...prev, scores: data.scores } : prev);
+            setGameNotice(`${data.username} scored ${data.points} point${data.points === 1 ? '' : 's'}`);
+            window.setTimeout(() => setGameNotice(null), 2500);
+        });
+        s.on('guess_poster_round_revealed', (data: { game: GuessPosterGame }) => {
+            setGuessPosterGame(data.game);
+            setGameNotice(`Answer: ${data.game.answerTitle || 'revealed'}`);
+        });
+        s.on('guess_poster_finished', (data: { game: GuessPosterGame }) => {
+            setGuessPosterGame(data.game);
+            setGameNotice('Game complete — final leaderboard');
+        });
+        s.on('guess_poster_ended', () => {
+            setGuessPosterGame(null);
+            setGameNotice(null);
         });
 
         s.on('room_chat_message', (msg: { id?: string; username: string; message: string; timestamp: number }) => {
@@ -341,6 +412,7 @@ export const WatchPartyView: React.FC<{
                 s.emit('join_room', {
                     roomId: cleanParam,
                     username: storedName,
+                    reconnect: true,
                     request: requestParam,
                     hostToken: localStorage.getItem(`slflix_host_token_${cleanParam}`) || undefined
                 });
@@ -453,6 +525,11 @@ export const WatchPartyView: React.FC<{
             username
         });
     }, [socket, currentRoom, username]);
+
+    const handleBufferingChange = useCallback((buffering: boolean) => {
+        if (!socket || !currentRoom) return;
+        socket.emit('room_buffering_status', { roomId: currentRoom.roomId, buffering });
+    }, [socket, currentRoom]);
 
     const handlePlayNextEpisode = useCallback(() => {
         if (!autoPlayNext) return;
@@ -659,7 +736,7 @@ export const WatchPartyView: React.FC<{
     const handleSendChat = (e: React.FormEvent) => {
         e.preventDefault();
         const text = chatInput.trim();
-        if (!text || !currentRoom || !socket) return;
+        if (!text || !currentRoom) return;
 
         const optimisticMsg = {
             id: 'msg_local_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
@@ -676,9 +753,44 @@ export const WatchPartyView: React.FC<{
             return updated;
         });
 
-        socket.emit('room_chat', { roomId: currentRoom.roomId, username, message: text });
+        if (socket?.connected) {
+            socket.emit('room_chat', { roomId: currentRoom.roomId, username, message: text });
+        } else {
+            offlineChatQueueRef.current = [...offlineChatQueueRef.current, { message: text, queuedAt: Date.now() }].slice(-20);
+        }
         setChatInput('');
     };
+
+    const getGuessPosterCandidates = () => {
+        const byId = new Map<string, { id: string; title: string; posterUrl: string }>();
+        [selectedMovie, currentRoom?.movie, ...searchResults].forEach((movie: any) => {
+            const id = String(movie?.subjectId || movie?.id || movie?.detailPath || '');
+            const title = String(movie?.title || movie?.name || '').trim();
+            const posterUrl = String(movie?.cover || movie?.thumbnail || movie?.posterUrl || '');
+            if (id && title) byId.set(id, { id, title, posterUrl });
+        });
+        return Array.from(byId.values()).slice(0, 30);
+    };
+
+    const handleStartGuessPoster = () => {
+        if (!socket || !currentRoom || !isCreator) return;
+        socket.emit('guess_poster_start', { roomId: currentRoom.roomId, candidates: getGuessPosterCandidates() });
+    };
+
+    const handleGuessSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        const guess = guessInput.trim().slice(0, 80);
+        if (!guess || !socket || !currentRoom || guessPosterGame?.status !== 'active') return;
+        socket.emit('guess_poster_submit', { roomId: currentRoom.roomId, guess });
+        setGuessInput('');
+    };
+
+    const gameRemainingSeconds = guessPosterGame?.status === 'active'
+        ? Math.max(0, Math.ceil((guessPosterGame.endsAt - gameNow) / 1000))
+        : 0;
+    const gameLeaderboard = guessPosterGame
+        ? Object.entries(guessPosterGame.scores).sort(([, left], [, right]) => right - left)
+        : [];
 
     const formatSeconds = (sec: number) => {
         const m = Math.floor(sec / 60);
@@ -702,7 +814,7 @@ export const WatchPartyView: React.FC<{
                          {isReconnecting && (
                              <div role="status" aria-live="polite" className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-200">
                                  <i className="fa-solid fa-rotate animate-spin"></i>
-                                 <span>Reconnecting…</span>
+                                 <span>Reconnecting...</span>
                              </div>
                          )}
                      </div>
@@ -960,6 +1072,7 @@ export const WatchPartyView: React.FC<{
                                         inStreamChat: inStreamLatestChat,
                                         pauseNotice: pauseNotice,
                                         onHostAction: handleHostAction,
+                                        onBufferingChange: handleBufferingChange,
                                         syncTime: currentRoom.currentTime,
                                         syncPaused: currentRoom.paused,
                                         syncTimestamp: roomSyncTimestamp
@@ -1224,6 +1337,51 @@ export const WatchPartyView: React.FC<{
                                     )}
                                 </div>
                             </div>
+
+                            {/* WAITING-ROOM GAME: GUESS THE POSTER */}
+                            <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4" aria-labelledby="guess-poster-title">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <h2 id="guess-poster-title" className="text-sm font-black text-purple-200">Guess the Poster</h2>
+                                        <p className="text-[10px] text-purple-300/80">A 5-round waiting-room game for up to 8 players.</p>
+                                    </div>
+                                    {isCreator && (!guessPosterGame || guessPosterGame.status === 'finished') && (
+                                        <button type="button" onClick={handleStartGuessPoster} disabled={currentRoom.users.length < 2 || getGuessPosterCandidates().length === 0} className="min-h-11 rounded-xl bg-purple-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">
+                                            Start game
+                                        </button>
+                                    )}
+                                </div>
+                                {guessPosterGame ? (
+                                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                                        <div>
+                                            <div className="flex items-center justify-between text-[11px] font-black text-purple-100">
+                                                <span>Round {guessPosterGame.round}/{guessPosterGame.maxRounds}</span>
+                                                {guessPosterGame.status === 'active' && <span>{gameRemainingSeconds}s</span>}
+                                            </div>
+                                            <div className="mt-2 overflow-hidden rounded-xl border border-white/10 bg-black/40">
+                                                {guessPosterGame.posterUrl ? (
+                                                    <img src={guessPosterGame.posterUrl} alt="Blurred mystery poster" className={`h-40 w-full object-cover transition-[filter] duration-500 ${guessPosterGame.status === 'active' ? 'blur-md' : 'blur-0'}`} style={{ filter: guessPosterGame.status === 'active' ? `blur(${Math.max(2, gameRemainingSeconds / 2)}px)` : 'none' }} />
+                                                ) : <div className="flex h-40 items-center justify-center text-xs text-gray-500">Poster unavailable</div>}
+                                            </div>
+                                            {guessPosterGame.status === 'active' && (
+                                                <form onSubmit={handleGuessSubmit} className="mt-2 flex gap-2">
+                                                    <input value={guessInput} onChange={e => setGuessInput(e.target.value)} maxLength={80} placeholder="Type your guess" className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/40 px-3 text-xs text-white outline-none focus:border-purple-300" aria-label="Guess the poster title" />
+                                                    <button type="submit" className="min-h-11 rounded-xl bg-purple-400 px-3 text-xs font-black text-black">Guess</button>
+                                                </form>
+                                            )}
+                                            {gameNotice && <p className="mt-2 text-[11px] font-bold text-amber-200" role="status">{gameNotice}</p>}
+                                            {guessPosterGame.revealed && <p className="mt-2 text-xs font-black text-emerald-200">Answer: {guessPosterGame.answerTitle}</p>}
+                                        </div>
+                                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                                            <h3 className="text-[10px] font-black uppercase tracking-wider text-purple-200">Scoreboard</h3>
+                                            <ol className="mt-2 space-y-1.5">
+                                                {gameLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between text-xs text-gray-200"><span>{index + 1}. {name}</span><strong className="text-purple-200">{score}</strong></li>)}
+                                            </ol>
+                                            {guessPosterGame.status === 'finished' && <p className="mt-3 text-[11px] font-black text-emerald-200">Final leaderboard</p>}
+                                        </div>
+                                    </div>
+                                ) : <p className="mt-3 text-[11px] text-gray-400">Waiting for the host to start a game. At least two members are required.</p>}
+                            </section>
                         </div>
 
                         {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
@@ -1337,7 +1495,7 @@ export const WatchPartyView: React.FC<{
                                                                 <span>{u.name}</span>
                                                                 {isMe && <span className="text-[10px] text-cyan-400 font-normal">(You)</span>}
                                                             </div>
-                                                            <div className="flex items-center gap-1 mt-0.5">
+                                                            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
                                                                 {isUserCreator ? (
                                                                     <span className="text-[9px] font-bold text-amber-300 bg-amber-400/15 border border-amber-400/30 px-1.5 py-0.2 rounded-md flex items-center gap-1">
                                                                         <i className="fa-solid fa-crown text-[8px]"></i> Host
@@ -1345,6 +1503,11 @@ export const WatchPartyView: React.FC<{
                                                                 ) : (
                                                                     <span className="text-[9px] font-semibold text-gray-400 bg-white/5 px-1.5 py-0.2 rounded-md">
                                                                         Viewer
+                                                                    </span>
+                                                                )}
+                                                                {u.buffering && (
+                                                                    <span className="text-[9px] font-bold text-amber-200 bg-amber-400/15 border border-amber-400/30 px-1.5 py-0.2 rounded-md flex items-center gap-1" title="This participant is buffering">
+                                                                        <i className="fa-solid fa-spinner fa-spin text-[8px]"></i> Buffering
                                                                     </span>
                                                                 )}
                                                             </div>

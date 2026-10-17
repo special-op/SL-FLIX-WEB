@@ -11,9 +11,12 @@ import { URL } from 'url';
 import compression from 'compression';
 import { randomUUID } from 'crypto';
 import { Resvg } from '@resvg/resvg-js';
+import dns from 'dns/promises';
+import net from 'net';
 import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
 import { getNormalizedChannels } from './server/iptvStorage.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -118,6 +121,23 @@ const ROOM_EMPTY_GRACE_MS = 10 * 60 * 1000; // how long an empty room survives (
 const MAX_WATCH_ROOMS = 100;
 const ROOM_CREATION_LIMIT = 3;
 const ROOM_CREATION_WINDOW_MS = 10 * 60 * 1000;
+const GUESS_POSTER_MAX_CANDIDATES = 30;
+const GUESS_POSTER_MAX_PLAYERS = 8;
+const GUESS_POSTER_ROUND_MS = 20 * 1000;
+const GUESS_POSTER_REVEAL_MS = 3 * 1000;
+const GUESS_POSTER_MAX_GUESS_LENGTH = 80;
+
+function clearGuessPosterGame(room) {
+    if (room?.guessPosterGame?.timer) clearTimeout(room.guessPosterGame.timer);
+    cleanupGuessPosterGame(room);
+}
+
+function publicRoomWithGame(room) {
+    const { guessPosterGame, reconnectGrace, ...publicRoom } = room;
+    return guessPosterGame
+        ? { ...publicRoom, guessPosterGame: getPublicGuessPosterGame(guessPosterGame) }
+        : publicRoom;
+}
 
 function getRoomCurrentTime(room) {
     if (!room) return 0;
@@ -133,8 +153,8 @@ function getActiveRoomsList() {
         // can still find their own room after a refresh or transient disconnect.
         .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < ROOM_EMPTY_GRACE_MS))
         .map(r => {
-            const { pendingRequests, hostToken, ...publicRoom } = r;
-            return { ...publicRoom, currentTime: getRoomCurrentTime(r) };
+            const { pendingRequests, hostToken, ...roomWithoutPrivateFields } = r;
+            return { ...publicRoomWithGame(roomWithoutPrivateFields), currentTime: getRoomCurrentTime(r) };
         });
 }
 
@@ -147,10 +167,12 @@ setInterval(() => {
     const now = Date.now();
     let hasChanges = false;
     for (const [roomId, room] of watchRooms.entries()) {
+        room.reconnectGrace = (room.reconnectGrace || []).filter(entry => now < entry.expiresAt);
         if (room.waitExpiresAt && (room.users || []).some(u => !u.isCreator)) room.waitExpiresAt = null; // a guest joined
         if (room.waitExpiresAt && now > room.waitExpiresAt) {
             io.to(roomId).emit('room_ended', { roomId, message: 'Nobody joined "' + room.roomName + '" within 30 minutes, so the room was closed.', endedBy: 'System' });
             io.in(roomId).socketsLeave(roomId);
+            clearGuessPosterGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
             continue;
@@ -158,6 +180,7 @@ setInterval(() => {
         const isEmpty = !room.users || room.users.length === 0;
         // Delete empty rooms older than 3 minutes, or any room older than 12 hours
         if ((isEmpty && now - (room.updatedAt || now) > ROOM_EMPTY_GRACE_MS) || (now - (room.updatedAt || now) > 12 * 60 * 60 * 1000)) {
+            clearGuessPosterGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
         }
@@ -199,8 +222,9 @@ function isRoomMember(room, socket) {
 }
 
 function getRoomStateForSocket(room, socket) {
-    const { hostToken, pendingRequests, ...publicRoom } = room;
+    const { hostToken, pendingRequests, ...roomWithoutPrivateFields } = room;
     const member = isRoomMember(room, socket);
+    const publicRoom = publicRoomWithGame(roomWithoutPrivateFields);
     return member?.isCreator ? { ...publicRoom, hostToken, pendingRequests: pendingRequests || [] } : publicRoom;
 }
 
@@ -225,6 +249,57 @@ function isRoomCreationRateLimited(socket) {
     return false;
 }
 
+function cleanGuessPosterCandidates(value) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > GUESS_POSTER_MAX_CANDIDATES) return null;
+    const candidates = value.map(candidate => {
+        if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+        const id = cleanText(candidate.id, 100);
+        const title = cleanText(candidate.title, 160);
+        const posterUrl = cleanText(candidate.posterUrl, 1000);
+        return id && title ? { id, title, posterUrl } : null;
+    });
+    return candidates.every(Boolean) ? candidates : null;
+}
+
+function scheduleGuessPosterRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.guessPosterGame;
+    if (!room || !game) return;
+    if (game.timer) clearTimeout(game.timer);
+    game.timer = setTimeout(() => revealGuessPosterRound(roomId), Math.max(0, game.endsAt - Date.now()));
+}
+
+function startNextGuessPosterRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const previous = room?.guessPosterGame;
+    if (!room || !previous || previous.round >= previous.maxRounds) return;
+    const next = createGuessPosterGame(previous.candidates, Date.now(), GUESS_POSTER_ROUND_MS);
+    room.guessPosterGame = {
+        ...next,
+        round: previous.round + 1,
+        maxRounds: previous.maxRounds,
+        scores: { ...previous.scores }
+    };
+    io.to(roomId).emit('guess_poster_started', { game: getPublicGuessPosterGame(room.guessPosterGame) });
+    scheduleGuessPosterRound(roomId);
+}
+
+function revealGuessPosterRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.guessPosterGame;
+    if (!room || !game || game.status !== 'active') return;
+    game.status = 'reveal';
+    game.revealed = true;
+    game.timer = null;
+    io.to(roomId).emit('guess_poster_round_revealed', { game: getPublicGuessPosterGame(game) });
+    if (game.round >= game.maxRounds) {
+        game.status = 'finished';
+        io.to(roomId).emit('guess_poster_finished', { game: getPublicGuessPosterGame(game) });
+        return;
+    }
+    game.timer = setTimeout(() => startNextGuessPosterRound(roomId), GUESS_POSTER_REVEAL_MS);
+}
+
 io.on('connection', (socket) => {
     socket.data.identity = Object.freeze({ id: socket.id });
     socket.data.eventTimestamps = [];
@@ -242,6 +317,10 @@ io.on('connection', (socket) => {
 
     socket.on('get_active_rooms', () => {
         socket.emit('active_rooms_list', getActiveRoomsList());
+    });
+
+    socket.on('network_quality_ping', (sentAt, acknowledge) => {
+        if (typeof acknowledge === 'function') acknowledge(Number.isFinite(Number(sentAt)) ? Number(sentAt) : Date.now());
     });
 
     socket.on('create_room', (payload) => {
@@ -269,12 +348,14 @@ io.on('connection', (socket) => {
             movie: movie && typeof movie === 'object' ? movie : null,
             currentSeason: Number.isInteger(Number(season)) && Number(season) >= 1 ? Number(season) : 1,
             currentEpisode: Number.isInteger(Number(episode)) && Number(episode) >= 1 ? Number(episode) : 1,
-            users: [{ id: socket.id, name: cleanUsername, isCreator: true }],
+            users: [{ id: socket.id, name: cleanUsername, isCreator: true, buffering: false }],
             messages: [],
             kickedUsers: [],
             pendingRequests: [],
             currentTime: 0,
             paused: false, // Starts playing continuous real-time movie stream
+            guessPosterGame: null,
+            reconnectGrace: [],
             waitExpiresAt: now + ROOM_WAIT_MS,
             updatedAt: now
         };
@@ -317,7 +398,8 @@ io.on('connection', (socket) => {
                 }
                 room.creator = cleanUsername;
             }
-            const requiresApproval = room.entryMode === 'manual' && !isCreatorUser;
+            const isGraceReconnect = Boolean(payload.reconnect) && (room.reconnectGrace || []).some(entry => entry.username.toLowerCase() === cleanUsername.toLowerCase());
+            const requiresApproval = room.entryMode === 'manual' && !isCreatorUser && !isGraceReconnect;
             if (requiresApproval) {
                 if (isRoomMember(room, socket)) {
                     return socket.emit('room_state', getRoomStateForSocket(room, socket));
@@ -350,6 +432,7 @@ io.on('connection', (socket) => {
             // Auto-Enter is enforced here rather than trusting the request flag. A direct
             // link, reconnect, or client that asks for approval must still enter immediately.
             room.pendingRequests = (room.pendingRequests || []).filter(request => request.socketId !== socket.id);
+            room.reconnectGrace = (room.reconnectGrace || []).filter(entry => entry.username.toLowerCase() !== cleanUsername.toLowerCase());
             socket.join(cleanRoomId);
             const currentComputedTime = getRoomCurrentTime(room);
             const existingUserIndex = isHostReconnect
@@ -363,8 +446,9 @@ io.on('connection', (socket) => {
                 }
                 room.users[existingUserIndex].id = socket.id;
                 room.users[existingUserIndex].name = cleanUsername;
+                room.users[existingUserIndex].buffering = false;
             } else {
-                room.users.push({ id: socket.id, name: cleanUsername, isCreator: isCreatorUser });
+                room.users.push({ id: socket.id, name: cleanUsername, isCreator: isCreatorUser, buffering: false });
             }
             if (!isCreatorUser) room.waitExpiresAt = null;
             room.updatedAt = Date.now();
@@ -408,7 +492,7 @@ io.on('connection', (socket) => {
                     continue;
                 }
                 targetSocket.join(roomId);
-                room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+                room.users.push({ id: targetSocket.id, name: request.username, isCreator: false, buffering: false });
                 room.waitExpiresAt = null;
                 targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
                 io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
@@ -437,7 +521,7 @@ io.on('connection', (socket) => {
         }
         if (!targetSocket) return;
         targetSocket.join(roomId);
-        room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+        room.users.push({ id: targetSocket.id, name: request.username, isCreator: false, buffering: false });
         room.waitExpiresAt = null;
         room.updatedAt = Date.now();
          targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
@@ -531,6 +615,7 @@ io.on('connection', (socket) => {
                     endedBy: member.name
                 });
                 io.in(cleanRoomId).socketsLeave(cleanRoomId);
+                clearGuessPosterGame(room);
                 watchRooms.delete(cleanRoomId);
                 broadcastActiveRooms();
             } else {
@@ -574,6 +659,21 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('room_buffering_status', (payload) => {
+        if (!validRoomPayload(payload) || typeof payload.buffering !== 'boolean') return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        if (!room || !member) return;
+
+        member.buffering = payload.buffering;
+        io.to(roomId).emit('room_buffering_status', {
+            username: member.name,
+            buffering: member.buffering,
+            users: room.users
+        });
+    });
+
     socket.on('room_action', (payload) => {
         if (!validRoomPayload(payload)) return;
         const { roomId, action, currentTime, paused, movie, season, episode } = payload;
@@ -602,10 +702,69 @@ io.on('connection', (socket) => {
                 movie: room.movie, 
                 season: room.currentSeason,
                 episode: room.currentEpisode,
-                username: member.name
+                username: member.name,
+                users: room.users
             });
             broadcastActiveRooms();
         }
+    });
+
+    socket.on('guess_poster_start', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        if (!room || !member?.isCreator) return socket.emit('error_message', { message: 'Only the host can start a game.' });
+        if (room.users.length < 2) return socket.emit('error_message', { message: 'Guess the Poster needs at least two room members.' });
+        if (room.guessPosterGame?.status === 'active' || room.guessPosterGame?.status === 'reveal') {
+            return socket.emit('error_message', { message: 'A Guess the Poster game is already running.' });
+        }
+        const candidates = cleanGuessPosterCandidates(payload.candidates);
+        if (!candidates) return socket.emit('error_message', { message: 'Send between 1 and 30 valid poster candidates.' });
+
+        clearGuessPosterGame(room);
+        const game = createGuessPosterGame(candidates, Date.now(), GUESS_POSTER_ROUND_MS);
+        game.scores = Object.fromEntries(room.users.slice(0, GUESS_POSTER_MAX_PLAYERS).map(user => [user.name, 0]));
+        room.guessPosterGame = game;
+        io.to(roomId).emit('guess_poster_started', { game: getPublicGuessPosterGame(game) });
+        scheduleGuessPosterRound(roomId);
+    });
+
+    socket.on('guess_poster_submit', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        const game = room?.guessPosterGame;
+        const guess = cleanText(payload.guess, GUESS_POSTER_MAX_GUESS_LENGTH);
+        if (!room || !member || !game || game.status !== 'active' || !guess) return;
+        if (!Object.prototype.hasOwnProperty.call(game.scores, member.name)) return;
+        const now = Date.now();
+        const rate = allowGuessRate((game.guessTimestamps || []).filter(entry => entry.socketId === socket.id).map(entry => entry.at), now);
+        game.guessTimestamps = (game.guessTimestamps || []).filter(entry => entry.socketId !== socket.id || now - entry.at < 1000);
+        if (!rate.allowed) return socket.emit('error_message', { message: 'Too many guesses. Slow down.' });
+        game.guessTimestamps.push({ socketId: socket.id, at: now });
+        if (game.correctGuesses.some(entry => entry.username === member.name)) return;
+        if (!isCorrectGuess(guess, game.answerTitle)) return;
+
+        const points = scoreForCorrectGuess(game.correctGuesses.length);
+        if (points <= 0) return;
+        game.correctGuesses.push({ username: member.name, points });
+        game.scores[member.name] += points;
+        io.to(roomId).emit('guess_poster_correct', {
+            username: member.name,
+            points,
+            scores: { ...game.scores }
+        });
+    });
+
+    socket.on('guess_poster_end', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        if (!room || !isRoomMember(room, socket)?.isCreator) return;
+        clearGuessPosterGame(room);
+        io.to(roomId).emit('guess_poster_ended', { roomId });
     });
 
     socket.on('room_chat', (payload) => {
@@ -651,6 +810,11 @@ io.on('connection', (socket) => {
         let changed = false;
         for (const [roomId, room] of watchRooms.entries()) {
             room.pendingRequests = (room.pendingRequests || []).filter(request => request.socketId !== socket.id);
+            const disconnectedMember = room.users.find(user => user.id === socket.data.identity?.id);
+            if (disconnectedMember) {
+                room.reconnectGrace = (room.reconnectGrace || []).filter(entry => entry.username.toLowerCase() !== disconnectedMember.name.toLowerCase());
+                room.reconnectGrace.push({ username: disconnectedMember.name, isCreator: disconnectedMember.isCreator, expiresAt: now + 30_000 });
+            }
             const beforeCount = room.users.length;
             room.users = room.users.filter(u => u.id !== socket.data.identity?.id);
             if (room.users.length !== beforeCount) {
@@ -734,8 +898,67 @@ app.use((req, res, next) => {
     }
     next();
 });
-function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {}) {
+const FIXED_PROXY_HOSTS = [
+    'api.omegatech.app',
+    'h5-api.aoneroom.com',
+    '123movienow.cc',
+    'moviebox.ph',
+    'cineverse.name.ng',
+    'movieapi.giftedtech.co.ke',
+    'omegatech-api.dixonomega.tech'
+];
+const MAX_PROXY_REDIRECTS = 3;
+const PROXY_DNS_TIMEOUT_MS = 3000;
+const PROXY_TIMEOUT_MS = 15000;
+const PROXY_RESPONSE_IDLE_TIMEOUT_MS = 30000;
+const MAX_PROXY_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+function isAllowedProxyHost(hostname) {
+    const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+    return FIXED_PROXY_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+}
+
+function isPrivateAddress(address) {
+    if (net.isIPv4(address)) {
+        const octets = address.split('.').map(Number);
+        return octets[0] === 10 || octets[0] === 127 ||
+            (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            (octets[0] === 192 && octets[1] === 168) ||
+            (octets[0] === 169 && octets[1] === 254) || octets[0] === 0;
+    }
+    if (net.isIPv6(address)) {
+        const normalized = address.toLowerCase();
+        return normalized === '::1' || normalized === '::' || normalized.startsWith('fc') ||
+            normalized.startsWith('fd') || normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+            normalized.startsWith('fea') || normalized.startsWith('feb') || normalized.startsWith('::ffff:127.') ||
+            normalized.startsWith('::ffff:10.') || normalized.startsWith('::ffff:192.168.') ||
+            normalized.startsWith('::ffff:172.');
+    }
+    return true;
+}
+
+async function resolveFixedProxyHost(hostname) {
+    const lookup = dns.lookup(hostname, { all: true, verbatim: true });
+    const records = await Promise.race([
+        lookup,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Proxy DNS timeout')), PROXY_DNS_TIMEOUT_MS))
+    ]);
+    const publicRecord = records.find((record) => !isPrivateAddress(record.address));
+    if (!publicRecord) throw new Error('Proxy destination resolved to a private address');
+    return publicRecord;
+}
+
+async function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {}, redirectHop = 0) {
     if (res.headersSent) return;
+    if (!isAllowedProxyHost(targetHost)) {
+        return res.status(502).json({ code: -1, message: 'Proxy destination is not allowlisted' });
+    }
+    let address;
+    try {
+        address = await resolveFixedProxyHost(targetHost);
+    } catch (error) {
+        return res.status(502).json({ code: -1, message: 'Proxy destination could not be validated' });
+    }
     const targetUrl = `https://${targetHost}${targetPath}`;
     console.log(`[PROXY] ${req.method} ${req.url} -> ${targetUrl}`);
     const options = {
@@ -747,15 +970,46 @@ function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {}) {
             host: targetHost,
             ...extraHeaders
         },
-        timeout: 15000
+        timeout: PROXY_TIMEOUT_MS,
+        lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+        servername: targetHost
     };
     const proxyReq = https.request(options, (proxyRes) => {
         if (res.headersSent) return;
         if (proxyRes.statusCode && proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
-            const redirectUrl = new URL(proxyRes.headers.location);
-            return proxyRequest(req, res, redirectUrl.hostname, redirectUrl.pathname + redirectUrl.search, extraHeaders);
+            if (redirectHop >= MAX_PROXY_REDIRECTS) {
+                proxyRes.resume();
+                return res.status(502).json({ code: -1, message: 'Proxy redirect limit exceeded' });
+            }
+            let redirectUrl;
+            try {
+                redirectUrl = new URL(proxyRes.headers.location, targetUrl);
+                if (redirectUrl.protocol !== 'https:' || !isAllowedProxyHost(redirectUrl.hostname)) {
+                    proxyRes.resume();
+                    return res.status(502).json({ code: -1, message: 'Proxy redirect destination is not allowlisted' });
+                }
+            } catch (error) {
+                proxyRes.resume();
+                return res.status(502).json({ code: -1, message: 'Proxy returned an invalid redirect' });
+            }
+            proxyRes.resume();
+            return proxyRequest(req, res, redirectUrl.hostname, redirectUrl.pathname + redirectUrl.search, extraHeaders, redirectHop + 1);
+        }
+        const declaredLength = Number(proxyRes.headers['content-length']);
+        if (Number.isFinite(declaredLength) && declaredLength > MAX_PROXY_RESPONSE_BYTES) {
+            proxyRes.resume();
+            return res.status(413).json({ code: -1, message: 'Proxy response exceeded size limit' });
         }
         res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+        let responseBytes = 0;
+        proxyRes.on('data', (chunk) => {
+            responseBytes += chunk.length;
+            if (responseBytes > MAX_PROXY_RESPONSE_BYTES) {
+                proxyRes.destroy(new Error('Proxy response exceeded size limit'));
+                if (!res.destroyed) res.destroy();
+            }
+        });
+        proxyRes.setTimeout(PROXY_RESPONSE_IDLE_TIMEOUT_MS, () => proxyRes.destroy(new Error('Proxy response idle timeout')));
         proxyRes.pipe(res, { end: true });
     });
     proxyReq.on('error', (err) => {
@@ -792,6 +1046,22 @@ const omegatechLimiter = rateLimit({
     },
     validate: { xForwardedForHeader: false, default: false }
 });
+const metadataProxyLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 120,
+    message: { error: 'Metadata proxy rate limit exceeded' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false }
+});
+const playerProxyLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 60,
+    message: { error: 'Player proxy rate limit exceeded' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false, default: false }
+});
 app.use('/api-omegatech', omegatechLimiter, (req, res) => {
     const pathWithoutPrefix = req.url.startsWith('/') ? req.url : '/' + req.url;
     proxyRequest(
@@ -801,7 +1071,7 @@ app.use('/api-omegatech', omegatechLimiter, (req, res) => {
         {}
     );
 });
-app.use('/api-metadata', (req, res) => {
+app.use('/api-metadata', metadataProxyLimiter, (req, res) => {
     const pathWithoutPrefix = req.url.startsWith('/') ? req.url : '/' + req.url;
     proxyRequest(
         req, res, 
@@ -810,7 +1080,7 @@ app.use('/api-metadata', (req, res) => {
         { 'Origin': 'https://moviebox.ph', 'Referer': 'https://moviebox.ph/' }
     );
 });
-app.use('/api-player', (req, res) => {
+app.use('/api-player', playerProxyLimiter, (req, res) => {
     const pathWithoutPrefix = req.url.startsWith('/') ? req.url : '/' + req.url;
     proxyRequest(
         req, res, 
