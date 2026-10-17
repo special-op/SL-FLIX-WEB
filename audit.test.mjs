@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { classifyNetworkQuality, calculateRetryDelay } from './utils/networkQuality.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 test('manifest and lockfile root dependencies agree', () => {
@@ -96,4 +98,126 @@ test('watch-party fetch timeout failures have a visible error state', () => {
   assert.match(client, /const \[streamError, setStreamError\]/);
   assert.match(client, /setStreamError\('Unable to load the stream right now/);
   assert.match(client, /role="alert"/);
+});
+
+test('watch-party viewers correct drift and publish participant buffering state', () => {
+  const client = read('./components/VideoPlayer/StreamingPlayer.tsx');
+  const types = read('./components/VideoPlayer/VideoPlayerTypes.ts');
+  const view = read('./components/WatchPartyView.tsx');
+  const hud = read('./components/VideoPlayer/VideoHud.tsx');
+  const server = read('./server.js');
+  assert.match(client, /watchPartyProps\.isHost/);
+  assert.match(client, /absoluteDiff > 1\.5/);
+  assert.match(client, /playbackRate = .*diff > 0/);
+  assert.match(types, /onBufferingChange/);
+  assert.match(view, /room_buffering_status/);
+  assert.match(view, /u\.buffering/);
+  assert.match(hud, /Buffering:/);
+  assert.match(server, /socket\.on\('room_buffering_status'/);
+  assert.match(server, /buffering: false/);
+});
+
+test('network quality hysteresis and retry backoff are bounded', () => {
+  assert.deepEqual(classifyNetworkQuality('good', true, 1, 0, 0), { quality: 'good', goodSince: 0 });
+  assert.deepEqual(classifyNetworkQuality('good', true, 2, 1_000, 0), { quality: 'slow', goodSince: null });
+  assert.deepEqual(classifyNetworkQuality('slow', true, 0, 20_000, null), { quality: 'slow', goodSince: 20_000 });
+  assert.deepEqual(classifyNetworkQuality('slow', true, 0, 50_000, 0), { quality: 'good', goodSince: 0 });
+  assert.deepEqual(classifyNetworkQuality('good', false, 0, 60_000, 0), { quality: 'offline', goodSince: null });
+  assert.equal(calculateRetryDelay(0, 300, 10_000, () => 0.5), 300);
+  assert.equal(calculateRetryDelay(5, 300, 10_000, () => 0.5), 9_600);
+});
+
+test('guess poster normalisation, fuzzy matching, scoring, privacy, rate limiting, and cleanup', () => {
+  assert.equal(normalizeGuess(' The Princess Bride! '), 'princess bride');
+  assert.equal(isCorrectGuess('princes bride', 'The Princess Bride'), true);
+  assert.equal(isCorrectGuess('wrong', 'The Princess Bride'), false);
+  assert.deepEqual([0, 1, 2, 3, 4].map(scoreForCorrectGuess), [3, 2, 1, 0, 0]);
+
+  const game = createGuessPosterGame([{ id: '1', title: 'Hidden Title', posterUrl: '/poster.jpg' }], 1000);
+  const publicGame = getPublicGuessPosterGame(game);
+  assert.equal('answerTitle' in publicGame, false);
+  assert.equal(publicGame.posterUrl, '/poster.jpg');
+
+  let rate = allowGuessRate([], 1000);
+  rate = allowGuessRate(rate.timestamps, 1100);
+  rate = allowGuessRate(rate.timestamps, 1200);
+  assert.equal(rate.allowed, true);
+  rate = allowGuessRate(rate.timestamps, 1300);
+  assert.equal(rate.allowed, false);
+
+  const room = { guessPosterGame: game };
+  cleanupGuessPosterGame(room);
+  assert.equal('guessPosterGame' in room, false);
+});
+
+test('guess poster server flow protects answer data and cleans game state', () => {
+  const server = read('./server.js');
+  assert.match(server, /socket\.on\('guess_poster_start'/);
+  assert.match(server, /room\.users\.length < 2/);
+  assert.match(server, /GUESS_POSTER_MAX_PLAYERS/);
+  assert.match(server, /socket\.on\('guess_poster_submit'/);
+  assert.match(server, /GUESS_POSTER_MAX_GUESS_LENGTH/);
+  assert.match(server, /allowGuessRate/);
+  assert.match(server, /guess_poster_round_revealed/);
+  assert.match(server, /clearGuessPosterGame\(room\)/);
+  assert.match(server, /guess_poster_finished/);
+});
+
+test('audited proxy routes use provider host allowlists and private-address checks', () => {
+  const api = read('./server/api.js');
+  const server = read('./server.js');
+  assert.match(api, /function isAllowedProxyHost\(/);
+  assert.match(api, /function isPrivateAddress\(/);
+  assert.match(api, /api\.omegatech\.app/);
+  assert.match(api, /h5-api\.aoneroom\.com/);
+  assert.match(api, /xnxx-cdn\.com/);
+  assert.match(api, /parseAllowedProxyUrl\(decodedUrl, IMAGE_PROXY_HOSTS\)/);
+  assert.match(api, /parseAllowedProxyUrl\(decodedUrl, ANIME_STREAM_HOSTS\)/);
+  assert.match(api, /parseAllowedProxyUrl\(decodedUrl, ADULT_STREAM_HOSTS\)/);
+  assert.match(server, /function isAllowedProxyHost\(/);
+  assert.match(server, /function isPrivateAddress\(/);
+  assert.match(server, /FIXED_PROXY_HOSTS/);
+});
+
+test('audited proxy redirects are bounded and revalidated at every hop', () => {
+  const api = read('./server/api.js');
+  const server = read('./server.js');
+  assert.match(api, /MAX_PROXY_REDIRECTS = 3/);
+  assert.match(api, /redirect: 'manual'/);
+  assert.match(api, /new URL\(location, parsed\)/);
+  assert.match(api, /new URL\(proxyRes\.headers\.location, parsedUrl\)/);
+  assert.match(api, /hop >= MAX_PROXY_REDIRECTS/);
+  assert.match(server, /MAX_PROXY_REDIRECTS = 3/);
+  assert.match(server, /new URL\(proxyRes\.headers\.location, targetUrl\)/);
+  assert.match(server, /redirectHop \+ 1/);
+  assert.match(server, /redirectUrl\.protocol !== 'https:'/);
+});
+
+test('audited proxy endpoints have endpoint-specific rate limits', () => {
+  const api = read('./server/api.js');
+  const server = read('./server.js');
+  assert.match(api, /router\.get\('\/subtitle', subtitleLimiter/);
+  assert.match(api, /router\.get\('\/tv\/img', imageProxyLimiter/);
+  assert.match(api, /router\.get\('\/anime\/stream-proxy', animeStreamLimiter/);
+  assert.match(api, /router\.get\('\/adult\/stream', adultStreamLimiter/);
+  assert.match(server, /metadataProxyLimiter/);
+  assert.match(server, /playerProxyLimiter/);
+  assert.match(server, /app\.use\('\/api-metadata', metadataProxyLimiter/);
+  assert.match(server, /app\.use\('\/api-player', playerProxyLimiter/);
+});
+
+test('audited proxy responses have strict timeout and practical size protections', () => {
+  const api = read('./server/api.js');
+  const server = read('./server.js');
+  assert.match(api, /AbortSignal\.timeout\(timeoutMs\)/);
+  assert.match(api, /MAX_SUBTITLE_BYTES = 2 \* 1024 \* 1024/);
+  assert.match(api, /MAX_IMAGE_BYTES = 5 \* 1024 \* 1024/);
+  assert.match(api, /readResponseBody\(response, MAX_SUBTITLE_BYTES\)/);
+  assert.match(api, /readResponseBody\(response, MAX_IMAGE_BYTES\)/);
+  assert.match(api, /STREAM_PROXY_IDLE_TIMEOUT_MS/);
+  assert.match(api, /proxyReq\.on\('timeout'/);
+  assert.match(server, /MAX_PROXY_RESPONSE_BYTES = 4 \* 1024 \* 1024/);
+  assert.match(server, /PROXY_RESPONSE_IDLE_TIMEOUT_MS/);
+  assert.match(server, /proxyReq\.on\('timeout'/);
+  assert.match(server, /declaredLength > MAX_PROXY_RESPONSE_BYTES/);
 });
