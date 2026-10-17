@@ -40,6 +40,8 @@ test('watch-party invites support share links, codes, and host approval', () => 
   assert.match(client, /request=1/);
   assert.match(client, /handleJoinRequestDecision/);
   assert.match(client, /navigator\.share/);
+  assert.match(client, /Copy link/);
+  assert.match(client, /Copy code/);
   assert.match(client, /Request to Join/);
 });
 
@@ -56,4 +58,42 @@ test('watch-party entry mode is server-authoritative and visible in the host UI'
   assert.match(client, /Manual Approval/);
   assert.match(client, /Auto-Enter/);
   assert.match(client, /isAutoEntry \? '' : '&request=1'/);
+});
+
+test('watch-party host refresh keeps the room through the reconnect grace window', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(server, /ROOM_EMPTY_GRACE_MS = 10 \* 60 \* 1000/);
+  assert.match(server, /hostToken: randomUUID\(\)/);
+  assert.match(server, /now - \(r\.updatedAt \|\| now\) < ROOM_EMPTY_GRACE_MS/);
+  assert.match(server, /room\.users\.length > 0/);
+  assert.match(client, /localStorage\.getItem\(`slflix_host_token_\$\{cleanParam\}`\)/);
+  assert.match(client, /s\.emit\('join_room'/);
+});
+
+test('watch-party wait timer closes abandoned rooms and clears when a guest joins', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(server, /ROOM_WAIT_MS = 30 \* 60 \* 1000/);
+  assert.match(server, /room\.waitExpiresAt && now > room\.waitExpiresAt/);
+  assert.match(server, /watchRooms\.delete\(roomId\)/);
+  assert.match(server, /if \(!isCreatorUser\) room\.waitExpiresAt = null/);
+  assert.match(client, /setWaitExpiresAt\(null\)/);
+});
+
+test('watch-party host seat cannot be claimed by a duplicate display name', () => {
+  const server = read('./server.js');
+  assert.match(server, /const isRoomHostName = room\.creator\.toLowerCase\(\) === cleanUsername\.toLowerCase\(\)/);
+  assert.match(server, /isRoomHostName && !isHostReconnect/);
+  assert.match(server, /That display name is already in use in this room/);
+  assert.doesNotMatch(server, /room\.users\[0\]\.isCreator = true; \/\/ hand over host/);
+});
+
+test('watch-party fetch timeout failures have a visible error state', () => {
+  const client = read('./components/WatchPartyView.tsx');
+  const api = read('./services/api.ts');
+  assert.match(api, /SHARED_FETCH_TIMEOUT_MS = 10_000/);
+  assert.match(client, /const \[streamError, setStreamError\]/);
+  assert.match(client, /setStreamError\('Unable to load the stream right now/);
+  assert.match(client, /role="alert"/);
 });

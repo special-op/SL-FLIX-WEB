@@ -22,7 +22,7 @@ SL FLIX PRO is a modern, high-performance streaming and media application engine
 ## Getting Started
 
 ### Prerequisites
-- Node.js 20.19.x (the version is pinned in `.nvmrc`)
+- Node.js 20.19 or newer (the tested runtime is pinned in `.nvmrc`)
 - npm 10+
 
 ### Installation
