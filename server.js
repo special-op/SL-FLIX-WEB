@@ -113,6 +113,11 @@ const trackVisitor = (ip, page = '/') => {
     }
 };
 const watchRooms = new Map();
+const ROOM_WAIT_MS = 30 * 60 * 1000;        // how long a room waits for its first guest
+const ROOM_EMPTY_GRACE_MS = 10 * 60 * 1000; // how long an empty room survives (host reconnect window)
+const MAX_WATCH_ROOMS = 100;
+const ROOM_CREATION_LIMIT = 3;
+const ROOM_CREATION_WINDOW_MS = 10 * 60 * 1000;
 
 function getRoomCurrentTime(room) {
     if (!room) return 0;
@@ -124,8 +129,9 @@ function getRoomCurrentTime(room) {
 function getActiveRoomsList() {
     const now = Date.now();
     return Array.from(watchRooms.values())
-        // Prevent spam: only list rooms with active viewers or created less than 2 minutes ago
-        .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < 2 * 60 * 1000))
+        // Keep empty rooms visible during the host reconnect grace period so a host
+        // can still find their own room after a refresh or transient disconnect.
+        .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < ROOM_EMPTY_GRACE_MS))
         .map(r => {
             const { pendingRequests, hostToken, ...publicRoom } = r;
             return { ...publicRoom, currentTime: getRoomCurrentTime(r) };
@@ -141,9 +147,17 @@ setInterval(() => {
     const now = Date.now();
     let hasChanges = false;
     for (const [roomId, room] of watchRooms.entries()) {
+        if (room.waitExpiresAt && (room.users || []).some(u => !u.isCreator)) room.waitExpiresAt = null; // a guest joined
+        if (room.waitExpiresAt && now > room.waitExpiresAt) {
+            io.to(roomId).emit('room_ended', { roomId, message: 'Nobody joined "' + room.roomName + '" within 30 minutes, so the room was closed.', endedBy: 'System' });
+            io.in(roomId).socketsLeave(roomId);
+            watchRooms.delete(roomId);
+            hasChanges = true;
+            continue;
+        }
         const isEmpty = !room.users || room.users.length === 0;
         // Delete empty rooms older than 3 minutes, or any room older than 12 hours
-        if ((isEmpty && now - (room.updatedAt || now) > 3 * 60 * 1000) || (now - (room.updatedAt || now) > 12 * 60 * 60 * 1000)) {
+        if ((isEmpty && now - (room.updatedAt || now) > ROOM_EMPTY_GRACE_MS) || (now - (room.updatedAt || now) > 12 * 60 * 60 * 1000)) {
             watchRooms.delete(roomId);
             hasChanges = true;
         }
@@ -198,9 +212,23 @@ function isSocketRateLimited(socket) {
     return timestamps.length > SOCKET_EVENT_LIMIT;
 }
 
+function isRoomCreationRateLimited(socket) {
+    const now = Date.now();
+    const timestamps = (socket.data.roomCreationTimestamps || [])
+        .filter(time => now - time < ROOM_CREATION_WINDOW_MS);
+    if (timestamps.length >= ROOM_CREATION_LIMIT) {
+        socket.data.roomCreationTimestamps = timestamps;
+        return true;
+    }
+    timestamps.push(now);
+    socket.data.roomCreationTimestamps = timestamps;
+    return false;
+}
+
 io.on('connection', (socket) => {
     socket.data.identity = Object.freeze({ id: socket.id });
     socket.data.eventTimestamps = [];
+    socket.data.roomCreationTimestamps = [];
     socket.use((packet, next) => {
         if (isSocketRateLimited(socket)) return next(new Error('Too many watch-party requests'));
         next();
@@ -224,6 +252,12 @@ io.on('connection', (socket) => {
         if (!cleanRoomId || !cleanUsername || watchRooms.has(cleanRoomId)) {
             return socket.emit('error_message', { message: 'Invalid or unavailable room.' });
         }
+        if (watchRooms.size >= MAX_WATCH_ROOMS) {
+            return socket.emit('error_message', { message: 'Watch party capacity has been reached. Try again later.' });
+        }
+        if (isRoomCreationRateLimited(socket)) {
+            return socket.emit('error_message', { message: 'Room creation is temporarily rate-limited. Please try again later.' });
+        }
         socket.join(cleanRoomId);
         const now = Date.now();
         const room = {
@@ -241,6 +275,7 @@ io.on('connection', (socket) => {
             pendingRequests: [],
             currentTime: 0,
             paused: false, // Starts playing continuous real-time movie stream
+            waitExpiresAt: now + ROOM_WAIT_MS,
             updatedAt: now
         };
         watchRooms.set(cleanRoomId, room);
@@ -267,6 +302,21 @@ io.on('connection', (socket) => {
 
             const isHostReconnect = typeof payload.hostToken === 'string' && payload.hostToken === room.hostToken;
             const isCreatorUser = isHostReconnect;
+            const nameOwner = room.users.find(user => user.name.toLowerCase() === cleanUsername.toLowerCase());
+            const pendingNameOwner = (room.pendingRequests || []).find(request => request.username.toLowerCase() === cleanUsername.toLowerCase());
+            const isRoomHostName = room.creator.toLowerCase() === cleanUsername.toLowerCase();
+            if ((nameOwner && nameOwner.id !== socket.id && (!isHostReconnect || !nameOwner.isCreator)) || (pendingNameOwner && pendingNameOwner.socketId !== socket.id) || (isRoomHostName && !isHostReconnect)) {
+                socket.emit('error_message', { message: 'That display name is already in use in this room. Pick another name.' });
+                return;
+            }
+            if (isHostReconnect) {
+                const creator = room.users.find(user => user.isCreator);
+                if (creator) {
+                    creator.id = socket.id;
+                    creator.name = cleanUsername;
+                }
+                room.creator = cleanUsername;
+            }
             const requiresApproval = room.entryMode === 'manual' && !isCreatorUser;
             if (requiresApproval) {
                 if (isRoomMember(room, socket)) {
@@ -302,13 +352,21 @@ io.on('connection', (socket) => {
             room.pendingRequests = (room.pendingRequests || []).filter(request => request.socketId !== socket.id);
             socket.join(cleanRoomId);
             const currentComputedTime = getRoomCurrentTime(room);
-            const existingUserIndex = room.users.findIndex(u => u.name.toLowerCase() === cleanUsername.toLowerCase());
+            const existingUserIndex = isHostReconnect
+                ? room.users.findIndex(u => u.isCreator)
+                : room.users.findIndex(u => u.name.toLowerCase() === cleanUsername.toLowerCase());
             if (existingUserIndex >= 0) {
+                const existing = room.users[existingUserIndex];
+                if (existing.isCreator && !isHostReconnect && existing.id !== socket.id && io.sockets.sockets.has(existing.id)) {
+                    socket.leave(cleanRoomId);
+                    return socket.emit('error_message', { message: 'That name belongs to the host. Pick another name.' });
+                }
                 room.users[existingUserIndex].id = socket.id;
                 room.users[existingUserIndex].name = cleanUsername;
             } else {
                 room.users.push({ id: socket.id, name: cleanUsername, isCreator: isCreatorUser });
             }
+            if (!isCreatorUser) room.waitExpiresAt = null;
             room.updatedAt = Date.now();
 
             const syncPayload = {
@@ -351,6 +409,7 @@ io.on('connection', (socket) => {
                 }
                 targetSocket.join(roomId);
                 room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+                room.waitExpiresAt = null;
                 targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
                 io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
             }
@@ -379,6 +438,7 @@ io.on('connection', (socket) => {
         if (!targetSocket) return;
         targetSocket.join(roomId);
         room.users.push({ id: targetSocket.id, name: request.username, isCreator: false });
+        room.waitExpiresAt = null;
         room.updatedAt = Date.now();
          targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
         io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
@@ -479,6 +539,22 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('extend_room_wait', (payload) => {
+
+        if (!validRoomPayload(payload)) return;
+
+        const roomId = cleanRoomIdValue(payload.roomId);
+
+        const room = watchRooms.get(roomId);
+
+        if (!room || !room.waitExpiresAt || !isRoomMember(room, socket)?.isCreator) return;
+
+        room.waitExpiresAt = Date.now() + ROOM_WAIT_MS;
+
+        io.to(roomId).emit('room_wait_updated', { roomId, waitExpiresAt: room.waitExpiresAt });
+
+    });
+
     socket.on('leave_room', (payload) => {
         if (!validRoomPayload(payload)) return;
         const { roomId } = payload;
@@ -490,11 +566,8 @@ io.on('connection', (socket) => {
             if (!member) return;
             room.users = room.users.filter(u => u.id !== socket.data.identity?.id);
             room.updatedAt = Date.now();
-            // Keep an empty room for the 3-minute sweep so the host can come back
+            // Keep an empty room for the reconnect grace window so the host can come back
             if (room.users.length > 0) {
-                if (member.isCreator && !room.users.some(u => u.isCreator)) {
-                    room.users[0].isCreator = true; // hand over host
-                }
                 io.to(cleanRoomId).emit('room_user_left', { username: member.name, usersCount: room.users.length, users: room.users });
             }
             broadcastActiveRooms();

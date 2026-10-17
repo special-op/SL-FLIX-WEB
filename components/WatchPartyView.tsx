@@ -51,6 +51,7 @@ interface WatchRoom {
     paused: boolean;
     entryMode: RoomEntryMode;
     hostToken?: string;
+    waitExpiresAt?: number | null;
     messages?: { id?: string; username: string; message: string; timestamp: number }[];
     kickedUsers?: string[];
     pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
@@ -61,6 +62,7 @@ export const WatchPartyView: React.FC<{
     onSelectMovieToWatch?: (movie: MovieResult) => void;
 }> = ({ onBack }) => {
     const [socket, setSocket] = useState<any>(null);
+    const [isReconnecting, setIsReconnecting] = useState(false);
     const [activeRooms, setActiveRooms] = useState<WatchRoom[]>([]);
     const [currentRoom, setCurrentRoom] = useState<WatchRoom | null>(null);
     const [username, setUsername] = useState<string>(() => localStorage.getItem('slflix_username') || `Viewer_${Math.floor(Math.random() * 10000)}`);
@@ -72,6 +74,14 @@ export const WatchPartyView: React.FC<{
     const [inStreamLatestChat, setInStreamLatestChat] = useState<{ username: string; message: string } | null>(null);
     const [pauseNotice, setPauseNotice] = useState<string | null>(null);
     const [inviteCopied, setInviteCopied] = useState(false);
+    const [waitExpiresAt, setWaitExpiresAt] = useState<number | null>(null);
+    const [waitNow, setWaitNow] = useState(() => Date.now());
+    useEffect(() => {
+        if (!waitExpiresAt) return;
+        const timer = window.setInterval(() => setWaitNow(Date.now()), 1000);
+        return () => window.clearInterval(timer);
+    }, [waitExpiresAt]);
+    const waitRemainingMs = waitExpiresAt ? Math.max(0, waitExpiresAt - waitNow) : 0;
     const [joinRequestState, setJoinRequestState] = useState<'idle' | 'pending' | 'denied'>('idle');
     const [joinRequests, setJoinRequests] = useState<{ requestId: string; username: string; requestedAt: number }[]>([]);
     const [roomSyncTimestamp, setRoomSyncTimestamp] = useState<number>(Date.now());
@@ -113,6 +123,7 @@ export const WatchPartyView: React.FC<{
     const [sources, setSources] = useState<VideoSource[]>([]);
     const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
     const [loadingStream, setLoadingStream] = useState<boolean>(false);
+    const [streamError, setStreamError] = useState<string | null>(null);
 
     // Initialize Socket
     useEffect(() => {
@@ -122,6 +133,7 @@ export const WatchPartyView: React.FC<{
 
         // Reconnect handler: immediately re-join room if connection drops and recovers
         s.on('connect', () => {
+            setIsReconnecting(false);
             const activeRoom = currentRoomRef.current;
             if (activeRoom) {
                 s.emit('join_room', {
@@ -141,6 +153,7 @@ export const WatchPartyView: React.FC<{
         });
 
         s.on('room_state', (room: WatchRoom) => {
+            setWaitExpiresAt(room.waitExpiresAt ?? null);
             setCurrentRoom(room);
             if (room.hostToken) {
                 try {
@@ -181,6 +194,9 @@ export const WatchPartyView: React.FC<{
             }
         });
 
+        s.on('disconnect', () => setIsReconnecting(true));
+        s.on('connect_error', () => setIsReconnecting(true));
+
         s.on('room_request_pending', () => setJoinRequestState('pending'));
         s.on('room_request_denied', (data: { message?: string }) => {
             setJoinRequestState('denied');
@@ -202,6 +218,7 @@ export const WatchPartyView: React.FC<{
         });
 
         s.on('room_user_joined', (data: { username: string; usersCount: number; users?: any[] }) => {
+            if (data.usersCount > 1) setWaitExpiresAt(null);
             if (data.users) {
                 setCurrentRoom(prev => prev ? { ...prev, users: data.users || prev.users } : null);
             }
@@ -239,6 +256,12 @@ export const WatchPartyView: React.FC<{
             }
             setPauseNotice(`${data.username} was removed by host`);
             setTimeout(() => setPauseNotice(null), 3500);
+        });
+
+        s.on('room_wait_updated', (data: { roomId: string; waitExpiresAt: number }) => {
+
+            setWaitExpiresAt(data.waitExpiresAt);
+
         });
 
         s.on('room_ended', (data: { roomId: string; message: string; endedBy: string }) => {
@@ -342,6 +365,9 @@ export const WatchPartyView: React.FC<{
         let isMounted = true;
         const loadMovieStreams = async () => {
             setLoadingStream(true);
+            setStreamError(null);
+            setSources([]);
+            setSubtitles([]);
             try {
                 // Fetch full details if series
                 const details = await ApiService.getDetails(selectedMovie);
@@ -361,6 +387,7 @@ export const WatchPartyView: React.FC<{
                 }
             } catch (err) {
                 console.error('Failed to fetch room video sources:', err);
+                if (isMounted) setStreamError('Unable to load the stream right now. Check your connection and try again.');
             } finally {
                 if (isMounted) setLoadingStream(false);
             }
@@ -509,6 +536,31 @@ export const WatchPartyView: React.FC<{
         }
     };
 
+    const handleCopyInviteLink = async () => {
+        if (!currentRoom) return;
+        const requestSuffix = (currentRoom.entryMode || 'manual') === 'auto' ? '' : '&request=1';
+        try {
+            await navigator.clipboard.writeText(`${window.location.origin}/watch-party?room=${currentRoom.roomId}${requestSuffix}`);
+            setInviteCopied(true);
+            window.setTimeout(() => setInviteCopied(false), 2000);
+        } catch {
+            setPauseNotice('Could not copy the invite link.');
+            window.setTimeout(() => setPauseNotice(null), 2500);
+        }
+    };
+
+    const handleCopyRoomCode = async () => {
+        if (!currentRoom) return;
+        try {
+            await navigator.clipboard.writeText(currentRoom.roomId);
+            setInviteCopied(true);
+            window.setTimeout(() => setInviteCopied(false), 2000);
+        } catch {
+            setPauseNotice('Could not copy the room code.');
+            window.setTimeout(() => setPauseNotice(null), 2500);
+        }
+    };
+
     const loadCategory = async (category: string) => {
         setSelectedCategory(category);
         setSearchQuery('');
@@ -573,7 +625,7 @@ export const WatchPartyView: React.FC<{
     const handleLeaveRoom = () => {
         if (socket && currentRoom) {
             socket.emit('leave_room', { roomId: currentRoom.roomId, username });
-            localStorage.removeItem(`slflix_host_token_${currentRoom.roomId}`);
+            // keep the host token on Leave so the host can reclaim the room (End Party still clears it)
         }
         setCurrentRoom(null);
         setSelectedMovie(null);
@@ -643,10 +695,16 @@ export const WatchPartyView: React.FC<{
                         <button onClick={onBack} className="text-gray-400 hover:text-cyan-400 text-xs font-bold flex items-center gap-2 mb-2 transition-colors">
                             <i className="fa-solid fa-arrow-left"></i> Back to Main Catalog
                         </button>
-                        <h1 className="text-2xl sm:text-3xl font-black bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-500 bg-clip-text text-transparent flex items-center gap-3">
+                         <h1 className="text-2xl sm:text-3xl font-black bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-500 bg-clip-text text-transparent flex items-center gap-3">
                             <i className="fa-solid fa-users-viewfinder text-cyan-400"></i> Watch Party Cinema
                         </h1>
                          <p className="text-gray-400 text-xs mt-0.5">Real-time synchronized video streaming, host master controls, live chat, and viewer metrics.</p>
+                         {isReconnecting && (
+                             <div role="status" aria-live="polite" className="mt-2 inline-flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-200">
+                                 <i className="fa-solid fa-rotate animate-spin"></i>
+                                 <span>Reconnecting…</span>
+                             </div>
+                         )}
                      </div>
                  </div>
 
@@ -863,6 +921,19 @@ export const WatchPartyView: React.FC<{
                                     <p className="text-sm font-bold text-white">Connecting Global Stream...</p>
                                     <p className="text-xs text-gray-400 mt-1">Synchronizing room audio & video tracks</p>
                                 </div>
+                            ) : streamError ? (
+                                <div role="alert" className="w-full aspect-video bg-[#121324] rounded-2xl border border-red-500/30 flex flex-col items-center justify-center p-6 text-center shadow-2xl">
+                                    <i className="fa-solid fa-triangle-exclamation text-red-400 text-4xl mb-3"></i>
+                                    <p className="text-sm font-bold text-white">Stream unavailable</p>
+                                    <p className="text-xs text-gray-400 mt-1">{streamError}</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => setSelectedMovie(prev => prev ? { ...prev } : prev)}
+                                        className="mt-4 rounded-xl bg-cyan-500 px-4 py-2 text-xs font-black text-black hover:bg-cyan-400 cursor-pointer"
+                                    >
+                                        Try again
+                                    </button>
+                                </div>
                             ) : sources.length > 0 ? (
                                 <VideoPlayer
                                     title={selectedMovie?.title || currentRoom.movie?.title || 'Watch Party Stream'}
@@ -1066,6 +1137,24 @@ export const WatchPartyView: React.FC<{
                                         )}
                                     </div>
 
+                                     {isCreator && waitExpiresAt && waitRemainingMs > 0 && (
+
+                                         <div role="status" className="px-3 py-2 bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-bold rounded-xl flex items-center gap-2">
+
+                                             <i className="fa-solid fa-hourglass-half"></i>
+
+                                             <span>Closes in {Math.floor(waitRemainingMs / 60000)}:{String(Math.floor((waitRemainingMs % 60000) / 1000)).padStart(2, '0')} if nobody joins</span>
+
+                                             {waitRemainingMs < 5 * 60 * 1000 && (
+
+                                                 <button onClick={() => socket?.emit('extend_room_wait', { roomId: currentRoom.roomId, username })} className="px-2 py-1 bg-amber-500 text-black rounded-lg cursor-pointer">+30 min</button>
+
+                                             )}
+
+                                         </div>
+
+                                     )}
+
                                      {/* Share invite link and six-character room code */}
                                      <button 
                                          onClick={handleShareInvite}
@@ -1076,14 +1165,20 @@ export const WatchPartyView: React.FC<{
                                          <span>{inviteCopied ? 'Copied!' : 'Invite'}</span>
                                      </button>
                                      <button
-                                         onClick={async () => {
-                                             try { await navigator.clipboard.writeText(currentRoom.roomId); setInviteCopied(true); window.setTimeout(() => setInviteCopied(false), 2000); } catch {}
-                                         }}
+                                         onClick={handleCopyInviteLink}
+                                         className="px-3.5 py-2 bg-white/5 hover:bg-white/15 text-gray-200 border border-white/10 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                                         title="Copy invite link"
+                                         aria-label="Copy invite link"
+                                     >
+                                         <i className="fa-solid fa-link mr-1.5"></i>Copy link
+                                     </button>
+                                     <button
+                                         onClick={handleCopyRoomCode}
                                          className="px-3.5 py-2 bg-white/5 hover:bg-white/15 text-gray-200 border border-white/10 font-mono font-bold text-xs rounded-xl transition-all cursor-pointer"
                                          title="Copy room code"
                                          aria-label={`Copy room code ${currentRoom.roomId}`}
                                      >
-                                         #{currentRoom.roomId}
+                                         <i className="fa-solid fa-copy mr-1.5"></i>Copy code <span className="text-cyan-300">#{currentRoom.roomId}</span>
                                      </button>
 
                                      {isCreator && joinRequests.length > 0 && (
