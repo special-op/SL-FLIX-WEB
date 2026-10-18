@@ -59,7 +59,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
   };
   const rating = m.imdbRating && m.imdbRating !== '0' && m.imdbRating !== 'null' ? m.imdbRating : null;
   return (
-    <div className="hero-shell min-h-[75vh] md:h-[80vh] relative flex flex-col bg-[#0a0a15] overflow-hidden group">
+    <div className="hero-shell min-h-[75vh] md:min-h-[80vh] relative flex flex-col bg-[#0a0a15] overflow-hidden group">
       <div className="absolute inset-0">
         {movies.map((movie, idx) => {
           const bgImg = movie.cover || movie.thumbnail || (movie as any).posterUrl;
@@ -74,7 +74,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
       </div>
       <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a15] via-[#0a0a15]/90 to-transparent"></div>
       <div className="absolute inset-0 bg-gradient-to-r from-[#0a0a15] via-[#0a0a15]/95 to-transparent/30"></div>
-       <div className="hero-content relative z-10 flex flex-1 items-center px-[4%] md:px-[6%] py-8 pb-10 md:py-0 md:pb-0 w-full max-w-7xl mx-auto flex-col md:flex-row justify-between gap-6 md:gap-16 mt-8 md:mt-0">
+       <div className="hero-content relative z-10 flex flex-1 items-center px-[4%] md:px-[6%] py-8 pb-6 md:py-10 md:pb-6 w-full max-w-7xl mx-auto flex-col md:flex-row justify-between gap-6 md:gap-16 mt-8 md:mt-0">
         <div className={`flex-1 transition-all duration-700 w-full ${isTransitioning ? 'opacity-0 -translate-x-4' : 'opacity-100 translate-x-0'}`}>
           <div className="flex flex-wrap items-center gap-3 mb-4">
             <span className="text-white font-bold text-[10px] md:text-xs tracking-[0.2em] uppercase px-3 py-1 bg-white/10 backdrop-blur-md rounded-sm border border-white/10">
@@ -87,7 +87,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
             )}
             {m.releaseDate && <span className="text-gray-300 text-[10px] md:text-xs font-medium bg-white/5 px-2 py-1 rounded-sm">{m.releaseDate.substring(0, 4)}</span>}
           </div>
-          <h1 className="text-3xl sm:text-5xl md:text-6xl lg:text-7xl font-black text-white mb-4 leading-[1.1] tracking-tighter drop-shadow-2xl line-clamp-3">
+          <h1 className="text-3xl sm:text-5xl md:text-6xl lg:text-7xl font-black text-white mb-4 pb-2 leading-[1.15] tracking-tighter drop-shadow-2xl line-clamp-3">
             {m.title}
           </h1>
           {m.genre && (
@@ -97,7 +97,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
             </div>
           )}
           <p className="text-gray-300 text-sm sm:text-base md:text-lg mb-8 max-w-2xl line-clamp-2 sm:line-clamp-3 md:line-clamp-4 drop-shadow-lg font-medium leading-relaxed">
-             {m.description?.trim() || 'Synopsis unavailable for this title.'}
+             {(() => { const d = m.description?.trim() || ''; return d && !/^trailer\s*[-:]/i.test(d) ? d : 'Synopsis unavailable for this title.'; })()}
           </p>
           <div className="flex flex-wrap items-center gap-4">
             <button 
@@ -128,7 +128,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
                  width={600}
                  height={900}
                  loading="eager"
-                 fetchPriority="high"
+                 {...({ fetchpriority: 'high' } as any)}
                  decoding="async"
                  className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
                />
@@ -142,7 +142,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
         </div>
       </div>
       {movies.filter(movie => Boolean(movie.cover || movie.thumbnail || (movie as any).posterUrl)).length > 1 && (
-          <div className="hero-thumbnail-strip relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[92%] md:max-w-[70%] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mx-0 md:mb-0 md:absolute md:bottom-6 md:right-[6%] md:w-auto">
+          <div className="hero-thumbnail-strip relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[1400px] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mb-6">
            {movies.map((movie, idx) => {
              const thumbnail = movie.cover || movie.thumbnail || (movie as any).posterUrl;
              if (!thumbnail) return null;
@@ -150,9 +150,9 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
              <button
                key={idx}
                onClick={() => goToSlide(idx)}
-               className={`relative w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
+               className={`relative bg-white/5 w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
              >
-                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading="lazy" decoding="async" className="w-full h-full object-cover" />
+                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading={idx < 8 ? 'eager' : 'lazy'} decoding="async" className="w-full h-full object-cover" />
               {idx === currentIndex && (
                 <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
                   <div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div>
