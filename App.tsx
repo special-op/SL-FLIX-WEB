@@ -29,6 +29,7 @@ const WatchPartyView = React.lazy(() => import('./components/WatchPartyView').th
 import { useHomeData } from './hooks/useHomeData';
 import { useMovieDetails } from './hooks/useMovieDetails';
 import { getOptimizedImageUrl } from './utils/image';
+const ENABLE_ADULT_SECTION = import.meta.env.VITE_ENABLE_ADULT_SECTION === 'true';
 
 import { 
   StarIcon, PlayIcon, PlusIcon, ShareIcon, BackIcon,
@@ -955,6 +956,7 @@ const App: React.FC = () => {
     const [currentView, setCurrentView] = useState<'home' | 'search' | 'details' | 'trending' | 'toplist' | 'api-docs' | 'live-tv' | 'anime' | 'sports' | 'news' | 'staff' | 'adult' | 'novels' | 'watch-party'>('home');
     const [selectedStaff, setSelectedStaff] = useState<{ id: string, name: string, avatar?: string } | null>(null);
     const [activeRooms, setActiveRooms] = useState<any[]>([]);
+    const [sourceFailure, setSourceFailure] = useState<{ title: string; season: number; episode: number; subjectId: string; detailPath?: string } | null>(null);
 
     useEffect(() => {
         const s = io();
@@ -1059,7 +1061,7 @@ const App: React.FC = () => {
         } catch (e) {}
     };
 
-    const { data: homeData, loading: homeLoading, error: homeError } = useHomeData();
+    const { data: homeData, loading: homeLoading, error: homeError, retry: retryHome } = useHomeData();
     const heroMovies = homeData?.hero || [];
     const categoriesData = homeData?.categories || [];
     const [selectedNovelId, setSelectedNovelId] = useState<string | null>(null);
@@ -1320,12 +1322,18 @@ const App: React.FC = () => {
         }
         if (movie.type === 'Live Sport' && movie.sourceUrl) { setPlayerState({ isOpen: true, title, sources: [{ quality: 720, stream: movie.sourceUrl, label: 'Live Stream', type: 'hls' }], subtitles: [], subjectId: movie.subjectId, initialTime: 0, isLive: true }); window.history.pushState({}, '', window.location.pathname + '/watch'); return; }
         setLoadingSources(true);
+        setSourceFailure(null);
         try {
             const data = await ApiService.getSources(activeSubjectId, movie.type, season, episode, activeDetailPath, movie.title);
             if (data.videos && data.videos.length > 0) {
                 setSourceModal({ isOpen: true, sources: data.videos, subtitles: data.subs || [], pendingContext: { title: movie.type.includes('Series') ? `${title} - S${season} E${episode}` : title, season, episode, initialTime, subjectId: activeSubjectId, detailPath: activeDetailPath } });
-            } else { showToast("No sources found. Try another movie.", "error"); }
-        } catch (e) { console.error('[App] Source error:', e); showToast("Error loading sources", "error"); }
+            } else {
+                setSourceFailure({ title, season, episode, subjectId: activeSubjectId, detailPath: activeDetailPath });
+            }
+        } catch (e) {
+            console.error('[App] Source error:', e);
+            setSourceFailure({ title, season, episode, subjectId: activeSubjectId, detailPath: activeDetailPath });
+        }
         finally { setLoadingSources(false); }
     };
     const handleTrendingClick = () => { hasNavigatedRef.current = true; setCurrentView('trending'); window.history.pushState({}, '', '/trending'); updateTrendingSEO(); if (trendingMovies.length === 0) loadTrending(0); };
@@ -1430,6 +1438,20 @@ const App: React.FC = () => {
                 }}
                 onToast={(m) => showToast(m, 'success')} 
             />
+            {sourceFailure && (
+                <div className="fixed inset-0 z-[2300] flex items-center justify-center bg-black/85 p-4 backdrop-blur-md" role="alert">
+                    <div className="w-full max-w-md rounded-3xl border border-amber-400/30 bg-[#12121a] p-6 text-center shadow-2xl">
+                        <i className="fa-solid fa-cloud-bolt mb-4 text-4xl text-amber-300" aria-hidden="true"></i>
+                        <h2 className="text-lg font-black text-white">Sources are unavailable right now</h2>
+                        <p className="mt-2 text-sm text-gray-400">The provider did not respond. Try again shortly instead of waiting on a blank player.</p>
+                        <div className="mt-5 flex flex-wrap justify-center gap-2">
+                            <button type="button" onClick={() => handleFetchSources(sourceFailure.title, sourceFailure.season, sourceFailure.episode, sourceFailure.subjectId, sourceFailure.detailPath)} className="min-h-11 rounded-xl bg-primary px-4 text-sm font-black text-black">Retry</button>
+                            {selectedMovie?.trailerUrl && <button type="button" onClick={() => { setSourceFailure(null); handlePlayTrailer(); }} className="min-h-11 rounded-xl border border-white/15 bg-white/10 px-4 text-sm font-bold text-white">Watch the trailer instead</button>}
+                            <button type="button" onClick={() => setSourceFailure(null)} className="min-h-11 rounded-xl px-4 text-sm font-bold text-gray-400 hover:text-white">Close</button>
+                        </div>
+                    </div>
+                </div>
+            )}
             {playerState.isOpen && (
                 <Suspense fallback={<LoadingView />}>
                     {playerState.isLive ? (
@@ -1483,7 +1505,7 @@ const App: React.FC = () => {
                         onAnime={handleAnimeClick}
                         onNovels={handleNovelsClick}
                         onWatchParty={() => handleWatchPartyClick()}
-                        onAdult={() => { hasNavigatedRef.current = true; setCurrentView('adult'); window.history.pushState({}, '', '/adult'); updateSearchSEO('+18 Hot'); }}
+                         onAdult={ENABLE_ADULT_SECTION ? () => { hasNavigatedRef.current = true; setCurrentView('adult'); window.history.pushState({}, '', '/adult'); updateSearchSEO('+18 Hot'); } : undefined}
                         isSearchOpen={isSearchOpen} 
                         setIsSearchOpen={setIsSearchOpen} 
                         trendingKeywords={trendingKeywords} 
@@ -1500,7 +1522,7 @@ const App: React.FC = () => {
                 />
                  <main className="flex-1 mobile-content-safe">
                     <Suspense fallback={<LoadingView />}>
-                        {currentView === 'home' && <HomePage heroMovies={heroMovies} categoriesData={categoriesData} onMovieClick={handleMovieClick} onToplistClick={handleToplistClick} loading={homeLoading} />}
+                        {currentView === 'home' && <HomePage heroMovies={heroMovies} categoriesData={categoriesData} onMovieClick={handleMovieClick} onToplistClick={handleToplistClick} loading={homeLoading} error={homeError} onRetry={retryHome} />}
                         {currentView === 'search' && (
                             <SearchView 
                                 query={searchState.query}
@@ -1614,10 +1636,10 @@ const App: React.FC = () => {
                                 <DockLabel>Trending</DockLabel>
                                 <DockIcon><i className={`fa-solid fa-fire text-xl ${currentView === "trending" ? "text-primary drop-shadow-[0_0_8px_rgba(0,229,255,0.8)]" : "text-gray-400"}`}></i></DockIcon>
                             </DockItem>
-                             <DockItem ariaLabel="Adult titles" onClick={() => { setCurrentView("adult"); window.history.pushState({}, "", "/adult"); }}>
-                                <DockLabel>+18 Hot</DockLabel>
-                                <DockIcon><i className={`fa-solid fa-shield-cat text-xl ${currentView === "adult" ? "text-fuchsia-400 drop-shadow-[0_0_8px_rgba(244,10,240,0.8)]" : "text-fuchsia-500/60"}`}></i></DockIcon>
-                            </DockItem>
+                             {ENABLE_ADULT_SECTION && <DockItem ariaLabel="Adult titles" onClick={() => { setCurrentView("adult"); window.history.pushState({}, "", "/adult"); }}>
+                                 <DockLabel>+18 Hot</DockLabel>
+                                 <DockIcon><i className={`fa-solid fa-shield-cat text-xl ${currentView === "adult" ? "text-fuchsia-400 drop-shadow-[0_0_8px_rgba(244,10,240,0.8)]" : "text-fuchsia-500/60"}`}></i></DockIcon>
+                             </DockItem>}
                              <DockItem ariaLabel="Search" onClick={() => setIsSearchOpen(true)}>
                                 <DockLabel>Search</DockLabel>
                                 <DockIcon><i className="fa-solid fa-search text-xl text-gray-400"></i></DockIcon>

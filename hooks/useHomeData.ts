@@ -9,6 +9,7 @@ export const useHomeData = () => {
   const [data, setData] = useState<HomeData>({ categories: [], hero: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
   const mountedRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
@@ -33,6 +34,6 @@ export const useHomeData = () => {
     return () => {
       mountedRef.current = false;
     };
-  }, []);
-  return { data, loading, error };
+  }, [retryKey]);
+  return { data, loading, error, retry: () => setRetryKey(value => value + 1) };
 };

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
 import { classifyNetworkQuality, calculateRetryDelay } from './utils/networkQuality.js';
 import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
 
@@ -220,4 +221,32 @@ test('audited proxy responses have strict timeout and practical size protections
   assert.match(server, /PROXY_RESPONSE_IDLE_TIMEOUT_MS/);
   assert.match(server, /proxyReq\.on\('timeout'/);
   assert.match(server, /declaredLength > MAX_PROXY_RESPONSE_BYTES/);
+});
+
+test('upstream circuit opens after three failures and permits one successful half-open trial', () => {
+  const breaker = createUpstreamCircuitBreaker({ openMs: 60_000, failureCacheMs: 0 });
+  const host = 'api.omegatech.app';
+  let upstreamCalls = 0;
+  for (let i = 0; i < 3; i += 1) {
+    const gate = breaker.beforeRequest(host, `${host}/sources/${i}`);
+    assert.equal(gate.allowed, true);
+    upstreamCalls += 1;
+    breaker.recordFailure(host, `${host}/sources/${i}`, 1000 + i);
+  }
+  const blocked = breaker.beforeRequest(host, `${host}/sources/next`, 2000);
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.response.error, 'upstream_unavailable');
+  assert.equal(upstreamCalls, 3);
+  assert.equal(breaker.beforeRequest(host, `${host}/sources/next`, 62_001).allowed, true);
+  breaker.recordSuccess(host);
+  assert.equal(breaker.beforeRequest(host, `${host}/sources/final`, 62_002).allowed, true);
+});
+
+test('home and source clients expose failure states instead of empty success data', () => {
+  const home = read('./components/HomePage.tsx');
+  const api = read('./services/api.ts');
+  assert.match(home, /Couldn't load this section/);
+  assert.match(home, /onRetry/);
+  assert.match(api, /Sources returned no playable streams/);
+  assert.match(api, /throw e/);
 });

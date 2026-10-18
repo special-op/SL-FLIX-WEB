@@ -33,6 +33,26 @@ const CategorySkeleton = () => (
     </div>
   </div>
 );
+const HeroThumbnail: React.FC<{ movie: MovieResult; active: boolean; onSelect: () => void }> = ({ movie, active, onSelect }) => {
+  const thumbnail = movie.cover || movie.thumbnail || (movie as any).posterUrl;
+  const [failed, setFailed] = React.useState(false);
+  if (!thumbnail) return null;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') { event.preventDefault(); event.currentTarget.nextElementSibling?.querySelector('button')?.focus(); }
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') { event.preventDefault(); event.currentTarget.previousElementSibling?.querySelector('button')?.focus(); }
+      }}
+      aria-label={`Show ${movie.title}`}
+      className={`relative bg-white/5 w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${active ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
+    >
+      {failed ? <span className="flex h-full w-full items-center justify-center text-primary" aria-hidden="true"><i className="fa-solid fa-film"></i></span> : <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} alt={`${movie.title} thumbnail`} width={100} height={150} loading="lazy" decoding="async" className="w-full h-full object-cover" onError={() => setFailed(true)} />}
+      {active && <div className="absolute inset-0 bg-primary/20 flex items-center justify-center"><div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div></div>}
+    </button>
+  );
+};
 const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, onDetails: (m: MovieResult) => void }> = ({ movies, onPlay, onDetails }) => {
   const [currentIndex, setCurrentIndex] = React.useState(0);
   const [isTransitioning, setIsTransitioning] = React.useState(false);
@@ -143,24 +163,7 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
       </div>
       {movies.filter(movie => Boolean(movie.cover || movie.thumbnail || (movie as any).posterUrl)).length > 1 && (
           <div className="hero-thumbnail-strip relative z-20 flex w-[92%] items-center gap-2 md:gap-3 bg-black/40 backdrop-blur-md p-1.5 rounded-xl border border-white/5 max-w-[1400px] overflow-x-auto scrollbar-hide scroll-snap-x mx-auto mb-4 md:mb-6">
-           {movies.map((movie, idx) => {
-             const thumbnail = movie.cover || movie.thumbnail || (movie as any).posterUrl;
-             if (!thumbnail) return null;
-             return (
-             <button
-               key={idx}
-               onClick={() => goToSlide(idx)}
-               style={{ display: 'none' }} className={`relative bg-white/5 w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
-             >
-                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} ref={(img) => { if (img && img.complete && img.naturalWidth > 0 && img.parentElement) img.parentElement.style.display = ''; }} onLoad={(e) => { const p = e.currentTarget.parentElement; if (p) p.style.display = ''; }} onError={(e) => { const p = e.currentTarget.parentElement; if (p) p.style.display = 'none'; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading="eager" decoding="async" className="w-full h-full object-cover" />
-              {idx === currentIndex && (
-                <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
-                  <div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div>
-                </div>
-              )}
-             </button>
-             );
-           })}
+            {movies.map((movie, idx) => <HeroThumbnail key={idx} movie={movie} active={idx === currentIndex} onSelect={() => goToSlide(idx)} />)}
         </div>
       )}
     </div>
@@ -310,7 +313,9 @@ const HomePage: React.FC<{
   onMovieClick: (m: MovieResult) => void;
   onToplistClick: (category?: string) => void;
   loading: boolean;
-}> = ({ heroMovies, categoriesData, onMovieClick, onToplistClick, loading }) => {
+  error?: string | null;
+  onRetry?: () => void;
+}> = ({ heroMovies, categoriesData, onMovieClick, onToplistClick, loading, error, onRetry }) => {
   const [selectedGenre, setSelectedGenre] = React.useState<string>('All');
   const genreNavRef = React.useRef<HTMLDivElement>(null);
 
@@ -403,6 +408,17 @@ const HomePage: React.FC<{
       <div className="animate-fade-in">
         <HeroSkeleton />
         {[1, 2, 3, 4].map((i) => <CategorySkeleton key={i} />)}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mx-auto my-16 max-w-md rounded-2xl border border-amber-400/30 bg-amber-500/10 px-6 py-12 text-center" role="alert">
+        <i className="fa-solid fa-triangle-exclamation mb-4 text-3xl text-amber-300" aria-hidden="true"></i>
+        <h3 className="text-lg font-bold text-white">Couldn't load this section</h3>
+        <p className="mb-6 mt-2 text-sm text-gray-400">The home catalog request failed. Your cached data was not available.</p>
+        <button type="button" onClick={onRetry} className="min-h-11 rounded-xl bg-primary px-5 text-sm font-black text-black">Retry</button>
       </div>
     );
   }

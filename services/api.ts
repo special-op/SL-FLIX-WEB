@@ -18,15 +18,15 @@ async function fetchWithTimeout(input: RequestInfo | URL, options: RequestInit =
 }
 async function fetchWithRetry<T>(
     fetchFn: () => Promise<T>,
-    retries: number = 10,
-    delay: number = 2000
+    retries: number = 2,
+    delay: number = 300
 ): Promise<T> {
     let lastError: Error | null = null;
     for (let i = 0; i < retries; i++) {
         try {
             return await fetchFn();
         } catch (error) {
-                        lastError = error as Error;
+            lastError = error as Error;
             if ((error as any).status === 429) {
                 console.warn('[API] Rate limit hit (429). Stop retrying.');
                 break;
@@ -45,9 +45,13 @@ async function fetchJson(url: string, options: RequestInit = {}) {
         'Content-Type': 'application/json',
     };
     const res = await fetchWithTimeout(url, { ...options, headers: { ...baseHeaders, ...options.headers } });
-        if (!res.ok) {
+    if (!res.ok) {
+        let body: any = null;
+        try { body = await res.clone().json(); } catch {}
         const err = new Error(`HTTP Error: ${res.status}`);
         (err as any).status = res.status;
+        (err as any).code = body?.error || body?.code;
+        (err as any).retryAfterSeconds = body?.retryAfterSeconds;
         throw err;
     }
     return res.json();
@@ -259,7 +263,7 @@ export const ApiService = {
         try {
             const data = await fetchWithRetry(
                 () => internalFetch(`${VIRTUAL_API_PATH}/home`),
-                2, 1
+                2, 300
             );
             let categories: CategoryData[] = [];
             let hero: MovieResult[] = [];
@@ -300,7 +304,8 @@ export const ApiService = {
                 });
             } else {
                 const staleCached = cacheService.get<{ categories: CategoryData[]; hero: MovieResult[] }>(cacheKey);
-                return staleCached?.data || { categories: [], hero: [] };
+                if (staleCached?.data) return staleCached.data;
+                throw new Error('Home catalog returned an invalid response');
             }
             try {
                 const tvHome = await Promise.race([
@@ -330,7 +335,8 @@ export const ApiService = {
         } catch (e) {
             console.error('[SLFLIX] Home data error:', e);
             const cached = cacheService.get<{ categories: CategoryData[]; hero: MovieResult[] }>(cacheKey);
-            return cached?.data || { categories: [], hero: [] };
+            if (cached?.data) return cached.data;
+            throw e;
         }
     },
     getDetails: async (movie: MovieResult) => {
@@ -346,7 +352,7 @@ export const ApiService = {
             try {
                 const data = await fetchWithRetry(
                     () => internalFetch(`${VIRTUAL_API_PATH}/detail?subjectId=${subjectId || ''}&path=${path || ''}`),
-                    2, 1
+                    2, 300
                 );
                 if ((data.code === 0 || data.success) && data.data) {
                     const d = data.data;
@@ -483,10 +489,10 @@ export const ApiService = {
                 cacheService.set(cacheKey, result, 5 * 60 * 1000);
                 return result;
             }
-            return { videos: [], subs: [] };
+            throw new Error('Sources returned no playable streams');
         } catch (e) {
             console.error("[SLFLIX] Sources fetch failed", e);
-            return { videos: [], subs: [] };
+            throw e;
         }
     },
     getTvHome: async (): Promise<any> => {
