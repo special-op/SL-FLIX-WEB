@@ -66,6 +66,7 @@ interface WatchRoom {
     pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
     guessPosterGame?: GuessPosterGame | null;
     triviaGame?: MovieTriviaGame | null;
+    partyGame?: PartyGame | null;
 }
 
 interface GuessPosterGame {
@@ -99,6 +100,35 @@ interface MovieTriviaGame {
     correctChoice?: string;
     category?: string;
 }
+
+type PartyGameType = 'emoji' | 'quote' | 'character' | 'scramble' | 'mixed';
+type PartyGameStatus = 'active' | 'reveal' | 'finished';
+
+interface PartyGame {
+    status: PartyGameStatus;
+    gameType: PartyGameType;
+    round: number;
+    maxRounds: number;
+    startedAt: number;
+    endsAt: number;
+    prompt?: string;
+    clue?: string;
+    imageUrl?: string;
+    category?: string;
+    contentType?: string;
+    roundType?: Exclude<PartyGameType, 'mixed'>;
+    scores: Record<string, number>;
+    revealed: boolean;
+    answer?: string;
+}
+
+const PARTY_GAME_OPTIONS: { value: PartyGameType; label: string; description: string; icon: string }[] = [
+    { value: 'emoji', label: 'Emoji Movie Titles', description: 'Decode a title from a trail of symbols.', icon: 'fa-face-grin-wink' },
+    { value: 'quote', label: 'Who Said It', description: 'Name the movie behind the quote.', icon: 'fa-quote-left' },
+    { value: 'character', label: 'Guess the Character', description: 'Identify the movie from its character.', icon: 'fa-masks-theater' },
+    { value: 'scramble', label: 'Title Scramble', description: 'Put the title back in the right order.', icon: 'fa-shuffle' },
+    { value: 'mixed', label: 'Mixed Party Mode', description: 'Rotate through every game type.', icon: 'fa-wand-magic-sparkles' },
+];
 
 export const WatchPartyView: React.FC<{
     onBack: () => void;
@@ -195,14 +225,26 @@ export const WatchPartyView: React.FC<{
     const [triviaError, setTriviaError] = useState<string | null>(null);
     const [isStartingTrivia, setIsStartingTrivia] = useState(false);
     const triviaStartingRef = useRef(false);
+    const [partyGame, setPartyGame] = useState<PartyGame | null>(null);
+    const [partyGameType, setPartyGameType] = useState<PartyGameType>('mixed');
+    const [partyRounds, setPartyRounds] = useState<'5' | '10' | 'custom'>('5');
+    const [partyCustomRounds, setPartyCustomRounds] = useState('8');
+    const [partyRoundMs, setPartyRoundMs] = useState(20000);
+    const [partyGuessInput, setPartyGuessInput] = useState('');
+    const [partyGameSubmitted, setPartyGameSubmitted] = useState(false);
+    const [partyGameNotice, setPartyGameNotice] = useState<string | null>(null);
+    const [partyGameError, setPartyGameError] = useState<string | null>(null);
+    const [isStartingPartyGame, setIsStartingPartyGame] = useState(false);
+    const partyGameStartingRef = useRef(false);
     const offlineChatQueueRef = useRef<{ message: string; queuedAt: number }[]>([]);
     useEffect(() => {
         const posterActive = guessPosterGame?.status === 'active';
         const triviaActive = triviaGame?.status === 'active';
-        if (!posterActive && !triviaActive) return;
+        const partyActive = partyGame?.status === 'active';
+        if (!posterActive && !triviaActive && !partyActive) return;
         const timer = window.setInterval(() => setGameNow(Date.now()), 250);
         return () => window.clearInterval(timer);
-    }, [guessPosterGame?.status, guessPosterGame?.endsAt, triviaGame?.status, triviaGame?.endsAt]);
+    }, [guessPosterGame?.status, guessPosterGame?.endsAt, triviaGame?.status, triviaGame?.endsAt, partyGame?.status, partyGame?.endsAt]);
 
     // Initialize Socket
     useEffect(() => {
@@ -241,6 +283,11 @@ export const WatchPartyView: React.FC<{
              setGuessPosterGame(room.guessPosterGame || null);
              setGuessPosterHistory(room.guessPosterGame ? [room.guessPosterGame] : []);
              setTriviaGame(room.triviaGame || null);
+             setPartyGame(room.partyGame || null);
+             setPartyGameSubmitted(false);
+             setIsStartingPartyGame(false);
+             partyGameStartingRef.current = false;
+             setPartyGameError(null);
             if (room.hostToken) {
                 try {
                     localStorage.setItem(`slflix_host_token_${room.roomId}`, room.hostToken);
@@ -392,10 +439,14 @@ export const WatchPartyView: React.FC<{
                  setSubtitles([]);
                  setChatMessages([]);
                  setGuessPosterGame(null);
-                 setGuessPosterHistory([]);
-                 setTriviaGame(null);
-                 setTriviaNotice(null);
-                 setPauseNotice(null);
+                  setGuessPosterHistory([]);
+                  setTriviaGame(null);
+                  setTriviaNotice(null);
+                  setPartyGame(null);
+                  setPartyGameSubmitted(false);
+                  setPartyGameNotice(null);
+                  setPartyGameError(null);
+                  setPauseNotice(null);
                 window.history.pushState({}, '', '/watch-party');
                 s.emit('get_active_rooms');
             }, 1200);
@@ -406,12 +457,17 @@ export const WatchPartyView: React.FC<{
              createInFlightRef.current = false;
                  setJoinRequestRoomId(null);
                  setJoinRequestState(prev => prev === 'submitting' ? 'idle' : prev);
-             if (triviaStartingRef.current) {
-                 setTriviaError(data.message || 'Movie Trivia could not start. Try again.');
-                 setIsStartingTrivia(false);
-                 triviaStartingRef.current = false;
-             }
-             setPauseNotice(data.message || 'Error occurred');
+              if (triviaStartingRef.current) {
+                  setTriviaError(data.message || 'Movie Trivia could not start. Try again.');
+                  setIsStartingTrivia(false);
+                  triviaStartingRef.current = false;
+              }
+              if (partyGameStartingRef.current) {
+                  setPartyGameError(data.message || 'Party game could not start. Try again.');
+                  setIsStartingPartyGame(false);
+                  partyGameStartingRef.current = false;
+              }
+              setPauseNotice(data.message || 'Error occurred');
             setTimeout(() => setPauseNotice(null), 3500);
         });
 
@@ -511,7 +567,45 @@ export const WatchPartyView: React.FC<{
          s.on('movie_trivia_ended', triviaEnded);
          s.on('trivia_ended', triviaEnded);
 
-        s.on('room_chat_message', (msg: { id?: string; username: string; message: string; timestamp: number }) => {
+         // Generic party games share one public payload for every round. The
+         // server deliberately omits `answer` until a reveal event arrives.
+         const applyPartyGame = (game: PartyGame | undefined, notice?: string) => {
+             if (!game) return;
+             setPartyGame(game);
+             setPartyGameSubmitted(false);
+             setIsStartingPartyGame(false);
+             partyGameStartingRef.current = false;
+             setPartyGameError(null);
+             if (notice) {
+                 setPartyGameNotice(notice);
+                 window.setTimeout(() => setPartyGameNotice(null), 2800);
+             }
+         };
+         const partyStarted = (data: { game?: PartyGame }) => applyPartyGame(data?.game);
+         const partyReveal = (data: { game?: PartyGame }) => applyPartyGame(data?.game, 'Round revealed — next clue is loading.');
+         const partyFinished = (data: { game?: PartyGame }) => applyPartyGame(data?.game, 'Party complete — final leaderboard.');
+         s.on('party_game_started', partyStarted);
+         s.on('party_game_round_started', partyStarted);
+         s.on('party_game_round_revealed', partyReveal);
+         s.on('party_game_finished', partyFinished);
+         s.on('party_game_score', (data: { username?: string; points?: number; tier?: string; scores?: Record<string, number> }) => {
+             if (data?.scores) setPartyGame(prev => prev ? { ...prev, scores: data.scores! } : prev);
+             if (data?.username) {
+                 if (data.username.toLowerCase() === usernameRef.current.toLowerCase()) setPartyGameSubmitted(true);
+                 const points = typeof data.points === 'number' ? data.points : 0;
+                 const tierLabel = data.tier === 'exact' ? 'Exact title' : data.tier === 'close' ? 'Close match' : data.tier === 'initial' ? 'Initials' : 'Wrong answer';
+                 setPartyGameNotice(`${data.username} · ${tierLabel} · +${points}`);
+                 window.setTimeout(() => setPartyGameNotice(null), 2400);
+             }
+         });
+         s.on('party_game_ended', () => {
+             setPartyGame(null);
+             setPartyGameSubmitted(false);
+             setPartyGameNotice(null);
+             setPartyGameError(null);
+         });
+
+         s.on('room_chat_message', (msg: { id?: string; username: string; message: string; timestamp: number }) => {
             setChatMessages(prev => {
                 // Deduplicate message
                 const exists = prev.some(m => (m.id && msg.id && m.id === msg.id) || (m.timestamp === msg.timestamp && m.username === msg.username && m.message === msg.message));
@@ -1004,6 +1098,101 @@ export const WatchPartyView: React.FC<{
         setGuessInput('');
     };
 
+    const getPartyGameCandidates = () => {
+        const byId = new Map<string, {
+            id: string;
+            title: string;
+            posterUrl?: string;
+            imageUrl?: string;
+            category?: string;
+            contentType?: string;
+            quote?: string;
+            emoji?: string;
+            aliases?: string[];
+        }>();
+        [currentRoom?.movie, selectedMovie, ...posterCandidatePool, ...searchResults].forEach((movie: any, index) => {
+            const title = String(movie?.title || movie?.name || '').trim();
+            if (!title) return;
+            const id = String(movie?.subjectId || movie?.id || movie?.detailPath || `party-movie-${index}-${title}`).trim();
+            const imageUrl = String(movie?.cover || movie?.thumbnail || movie?.posterUrl || '').trim();
+            const contentType = String(movie?.contentType || movie?.mediaType || movie?.type || '').trim();
+            const category = String(movie?.category || selectedCategory || '').trim();
+            const aliases = Array.isArray(movie?.aliases) ? movie.aliases.map((alias: unknown) => String(alias).trim()).filter(Boolean) : undefined;
+            byId.set(id, {
+                id,
+                title,
+                ...(imageUrl ? { posterUrl: imageUrl, imageUrl } : {}),
+                ...(contentType ? { contentType } : {}),
+                ...(category ? { category } : {}),
+                ...(movie?.quote || movie?.tagline ? { quote: String(movie.quote || movie.tagline) } : {}),
+                ...(movie?.emoji || movie?.emojis ? { emoji: String(movie.emoji || movie.emojis) } : {}),
+                ...(aliases?.length ? { aliases } : {})
+            });
+        });
+        return Array.from(byId.values()).slice(0, 50);
+    };
+
+    const getPartyGameCharacters = () => {
+        const movieTitle = String(selectedMovie?.title || currentRoom?.movie?.title || '').trim();
+        const castSources = [movieDetails?.cast, selectedMovie?.cast, currentRoom?.movie?.cast].filter(Array.isArray) as any[][];
+        const byId = new Map<string, { id: string; name: string; title: string; imageUrl?: string; category?: string; contentType?: string }>();
+        castSources.flat().forEach((cast: any, index: number) => {
+            const name = String(cast?.character || cast?.characterName || cast?.name || cast?.role || '').trim();
+            const title = String(cast?.movieTitle || cast?.movie?.title || cast?.title || movieTitle).trim();
+            if (!name || !title) return;
+            const id = String(cast?.id || `party-character-${index}-${name}`).trim();
+            const imageUrl = String(cast?.avatar || cast?.imageUrl || cast?.profileUrl || cast?.profile_path || cast?.posterUrl || '').trim();
+            byId.set(id, {
+                id,
+                name,
+                title,
+                ...(imageUrl ? { imageUrl } : {}),
+                ...(selectedCategory ? { category: selectedCategory } : {}),
+                contentType: 'character'
+            });
+        });
+        return Array.from(byId.values()).slice(0, 100);
+    };
+
+    const handleStartPartyGame = () => {
+        if (!socket || !currentRoom || !isCreator || currentRoom.users.length < 2 || isStartingPartyGame) return;
+        const candidates = getPartyGameCandidates();
+        const characters = getPartyGameCharacters();
+        if (!candidates.length && !characters.length) {
+            setPartyGameError('Choose a movie or search the catalog before starting a party game.');
+            return;
+        }
+        partyGameStartingRef.current = true;
+        setIsStartingPartyGame(true);
+        setPartyGameError(null);
+        setPartyGameNotice(null);
+        setPartyGameSubmitted(false);
+        socket.emit('party_game_start', {
+            roomId: currentRoom.roomId,
+            gameType: partyGameType,
+            rounds: partyRounds === 'custom' ? 'custom' : Number(partyRounds),
+            customRounds: partyRounds === 'custom' ? Number(partyCustomRounds) : undefined,
+            roundMs: partyRoundMs,
+            candidates,
+            characters,
+            movie: selectedMovie || currentRoom.movie
+        });
+    };
+
+    const handlePartyGameSubmit = (e: React.FormEvent) => {
+        e.preventDefault();
+        const guess = partyGuessInput.trim().slice(0, 80);
+        if (!guess || !socket || !currentRoom || !partyGame || partyGame.status !== 'active' || partyGameSubmitted) return;
+        setPartyGameSubmitted(true);
+        setPartyGuessInput('');
+        socket.emit('party_game_submit', { roomId: currentRoom.roomId, guess });
+    };
+
+    const handleEndPartyGame = () => {
+        if (!socket || !currentRoom || !isCreator) return;
+        socket.emit('party_game_end', { roomId: currentRoom.roomId });
+    };
+
     const gameRemainingSeconds = guessPosterGame?.status === 'active'
         ? Math.max(0, Math.ceil((guessPosterGame.endsAt - gameNow) / 1000))
         : 0;
@@ -1016,6 +1205,14 @@ export const WatchPartyView: React.FC<{
     const triviaLeaderboard = triviaGame
         ? Object.entries(triviaGame.scores || {}).sort(([, left], [, right]) => right - left)
         : [];
+    const partyGameRemainingSeconds = partyGame?.status === 'active'
+        ? Math.max(0, Math.ceil((partyGame.endsAt - gameNow) / 1000))
+        : 0;
+    const partyGameLeaderboard = partyGame
+        ? Object.entries(partyGame.scores || {}).sort(([, left], [, right]) => right - left)
+        : [];
+    const activePartyRoundType = partyGame?.roundType || partyGame?.gameType;
+    const activePartyMode = PARTY_GAME_OPTIONS.find(option => option.value === activePartyRoundType);
 
     const formatSeconds = (sec: number) => {
         const m = Math.floor(sec / 60);
@@ -1788,9 +1985,118 @@ export const WatchPartyView: React.FC<{
                                         {triviaNotice && <p className="mt-2 text-[11px] font-bold text-amber-200" role="status">{triviaNotice}</p>}
                                     </div>
                                     <div className="rounded-xl border border-white/10 bg-black/20 p-3"><h3 className="text-[10px] font-black uppercase tracking-wider text-cyan-200">Scoreboard</h3><ol className="mt-2 space-y-1.5">{triviaLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between text-xs text-gray-200"><span>{index + 1}. {name}</span><strong className="text-cyan-200">{score}</strong></li>)}</ol>{triviaLeaderboard.length === 0 && <p className="mt-2 text-[11px] text-gray-500">Scores appear after the first answer.</p>}{triviaGame.status === 'finished' && <p className="mt-3 text-[11px] font-black text-emerald-200">Final leaderboard</p>}</div>
-                                </div> : !isStartingTrivia && !triviaError && <div className="mt-3 rounded-xl border border-dashed border-white/10 bg-black/15 px-3 py-5 text-center text-[11px] text-gray-400"><i className="fa-solid fa-circle-question mb-2 text-2xl text-cyan-400/50"></i><p>No trivia round is active.</p><p className="mt-1 text-gray-500">The host can start Movie Trivia when at least two people are in the room.</p></div>}
-                            </section>
-                        </div>
+                                 </div> : !isStartingTrivia && !triviaError && <div className="mt-3 rounded-xl border border-dashed border-white/10 bg-black/15 px-3 py-5 text-center text-[11px] text-gray-400"><i className="fa-solid fa-circle-question mb-2 text-2xl text-cyan-400/50"></i><p>No trivia round is active.</p><p className="mt-1 text-gray-500">The host can start Movie Trivia when at least two people are in the room.</p></div>}
+                             </section>
+                             {/* GENERIC PARTY GAME LOBBY & LIVE CARD */}
+                             <section className="overflow-hidden rounded-2xl border border-fuchsia-400/25 bg-[linear-gradient(135deg,rgba(36,20,56,.8),rgba(8,13,27,.95))] p-4 shadow-xl" aria-labelledby="party-game-title">
+                                 <div className="flex flex-wrap items-start justify-between gap-3">
+                                     <div>
+                                         <div className="flex flex-wrap items-center gap-2">
+                                             <span className="rounded-full bg-fuchsia-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-[0.16em] text-fuchsia-200">Party arcade</span>
+                                             <span className="text-[10px] text-fuchsia-200/60">Live socket game</span>
+                                         </div>
+                                         <h2 id="party-game-title" className="mt-1 text-base font-black text-white">Movie Matchup</h2>
+                                         <p className="mt-1 max-w-xl text-[10px] leading-relaxed text-fuchsia-100/65">A compact five-point race through clues, quotes, characters, and scrambled titles.</p>
+                                     </div>
+                                     {isCreator && partyGame && <button type="button" onClick={handleEndPartyGame} className="min-h-10 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-[11px] font-black text-red-200 transition-colors hover:bg-red-500 hover:text-white">End game</button>}
+                                 </div>
+
+                                 {isCreator && (!partyGame || partyGame.status === 'finished') && (
+                                     <div className="mt-4 rounded-2xl border border-white/10 bg-black/25 p-3">
+                                         <div className="mb-3 flex items-center justify-between gap-2">
+                                             <div>
+                                                 <p className="text-[10px] font-black uppercase tracking-[0.16em] text-fuchsia-200">Game lobby</p>
+                                                 <p className="mt-1 text-[11px] text-gray-400">Host controls · {currentRoom.users.length}/20 players in room</p>
+                                             </div>
+                                             {currentRoom.users.length < 2 && <span className="rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-1 text-[10px] font-bold text-amber-200">Need 2 players</span>}
+                                         </div>
+                                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+                                             {PARTY_GAME_OPTIONS.map(option => (
+                                                 <button
+                                                     key={option.value}
+                                                     type="button"
+                                                     aria-pressed={partyGameType === option.value}
+                                                     onClick={() => setPartyGameType(option.value)}
+                                                     className={`min-h-[84px] rounded-xl border p-2.5 text-left transition-all ${partyGameType === option.value ? 'border-fuchsia-300 bg-fuchsia-400/15 text-white shadow-lg shadow-fuchsia-500/10' : 'border-white/10 bg-white/[0.03] text-gray-300 hover:border-fuchsia-300/50 hover:bg-fuchsia-400/10'}`}
+                                                 >
+                                                     <i className={`fa-solid ${option.icon} text-sm ${partyGameType === option.value ? 'text-fuchsia-200' : 'text-gray-500'}`}></i>
+                                                     <span className="mt-2 block text-[11px] font-black leading-tight">{option.label}</span>
+                                                     <span className="mt-1 block text-[9px] leading-snug text-gray-500">{option.description}</span>
+                                                 </button>
+                                             ))}
+                                         </div>
+                                         <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                                             <label className="text-[10px] font-black uppercase tracking-wider text-gray-400">Rounds
+                                                 <select value={partyRounds} onChange={e => setPartyRounds(e.target.value as '5' | '10' | 'custom')} className="mt-1 min-h-10 w-full rounded-xl border border-white/10 bg-[#0a0b14] px-3 text-xs font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-300">
+                                                     <option value="5">5 rounds</option>
+                                                     <option value="10">10 rounds</option>
+                                                     <option value="custom">Custom</option>
+                                                 </select>
+                                             </label>
+                                             <label className="text-[10px] font-black uppercase tracking-wider text-gray-400">Seconds per round
+                                                 <select value={partyRoundMs} onChange={e => setPartyRoundMs(Number(e.target.value))} className="mt-1 min-h-10 w-full rounded-xl border border-white/10 bg-[#0a0b14] px-3 text-xs font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-300">
+                                                     <option value={15000}>15 seconds</option>
+                                                     <option value={20000}>20 seconds</option>
+                                                     <option value={30000}>30 seconds</option>
+                                                     <option value={45000}>45 seconds</option>
+                                                     <option value={60000}>60 seconds</option>
+                                                 </select>
+                                             </label>
+                                             {partyRounds === 'custom' ? (
+                                                 <label className="text-[10px] font-black uppercase tracking-wider text-gray-400">Custom rounds
+                                                     <input type="number" min={1} max={50} value={partyCustomRounds} onChange={e => setPartyCustomRounds(e.target.value)} className="mt-1 min-h-10 w-full rounded-xl border border-white/10 bg-[#0a0b14] px-3 text-xs font-bold normal-case tracking-normal text-white outline-none focus:border-fuchsia-300" />
+                                                 </label>
+                                             ) : (
+                                                 <div className="flex items-end text-[10px] leading-relaxed text-gray-500">{partyGameType === 'mixed' ? 'Rotates Emoji → Quote → Character → Scramble.' : 'Every player sees the same clue at the same time.'}</div>
+                                             )}
+                                         </div>
+                                         {partyGameError && <div role="alert" className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-[11px] font-bold text-red-200"><i className="fa-solid fa-triangle-exclamation mr-1.5"></i>{partyGameError}</div>}
+                                         {isStartingPartyGame && <div className="mt-3 flex items-center gap-2 rounded-xl border border-fuchsia-300/20 bg-fuchsia-500/10 px-3 py-2 text-[11px] text-fuchsia-100" role="status"><span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-fuchsia-200 border-t-transparent"></span>Setting up the room game…</div>}
+                                         <button type="button" onClick={handleStartPartyGame} disabled={isStartingPartyGame || currentRoom.users.length < 2 || !socket} className="mt-3 min-h-11 w-full rounded-xl bg-fuchsia-300 px-4 text-xs font-black text-[#1b0927] shadow-lg shadow-fuchsia-500/20 transition-colors hover:bg-fuchsia-200 disabled:cursor-not-allowed disabled:opacity-40">{isStartingPartyGame ? 'Starting…' : 'Start party game'}</button>
+                                     </div>
+                                 )}
+
+                                 {!partyGame && !isCreator && <div className="mt-4 rounded-xl border border-dashed border-white/10 bg-black/15 px-3 py-6 text-center text-[11px] text-gray-400"><i className="fa-solid fa-hourglass-half mb-2 text-2xl text-fuchsia-300/50"></i><p>Waiting for the host to open the arcade.</p><p className="mt-1 text-gray-500">At least two players are required.</p></div>}
+                                 {partyGame && (
+                                     <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(180px,.42fr)]">
+                                         <div className="min-w-0 rounded-2xl border border-white/10 bg-black/30 p-3">
+                                             <div className="flex flex-wrap items-center justify-between gap-2">
+                                                 <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-fuchsia-100"><span>Round {partyGame.round}/{partyGame.maxRounds}</span>{activePartyMode && <span className="rounded-full bg-fuchsia-400/15 px-2 py-1 text-fuchsia-200">{activePartyMode.label}</span>}</div>
+                                                 {partyGame.status === 'active' && <span className={`rounded-full px-2.5 py-1 text-xs font-black ${partyGameRemainingSeconds <= 5 ? 'bg-red-500/20 text-red-200' : 'bg-fuchsia-400/15 text-fuchsia-100'}`} role="timer" aria-label={`${partyGameRemainingSeconds} seconds remaining`}><i className="fa-solid fa-clock mr-1.5"></i>{partyGameRemainingSeconds}s</span>}
+                                             </div>
+                                             <div className="mt-3 overflow-hidden rounded-xl border border-fuchsia-300/15 bg-[radial-gradient(circle_at_50%_0%,rgba(217,70,239,.22),transparent_58%)] p-4 text-center">
+                                                 <p className="text-[10px] font-black uppercase tracking-[0.22em] text-fuchsia-200/70">{partyGame.prompt || 'Clue incoming'}</p>
+                                                 <p className="mt-3 break-words text-2xl font-black leading-tight text-white sm:text-3xl">{partyGame.clue || '…'}</p>
+                                                 {partyGame.imageUrl && <img src={partyGame.imageUrl} alt="Party game clue" loading="lazy" className={`mx-auto mt-3 max-h-36 max-w-full rounded-xl object-cover ${partyGame.status === 'active' && partyGame.roundType === 'character' ? 'blur-sm' : ''}`} onError={e => { e.currentTarget.style.display = 'none'; }} />}
+                                                 {partyGame.category && <span className="mt-3 inline-flex rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2 py-1 text-[10px] font-bold text-cyan-100">{partyGame.category}</span>}
+                                             </div>
+                                             {partyGame.status === 'active' ? (
+                                                 partyGameSubmitted ? (
+                                                     <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-300/25 bg-emerald-500/10 px-3 py-3 text-xs font-black text-emerald-100" role="status"><i className="fa-solid fa-lock"></i><span>Answer locked · waiting for the reveal</span></div>
+                                                 ) : (
+                                                     <form onSubmit={handlePartyGameSubmit} className="mt-3 flex gap-2">
+                                                         <label htmlFor="party-game-guess" className="sr-only">Your party game guess</label>
+                                                         <input id="party-game-guess" value={partyGuessInput} onChange={e => setPartyGuessInput(e.target.value)} maxLength={80} placeholder="Type your guess…" autoComplete="off" className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/40 px-3 text-xs text-white outline-none transition-colors focus:border-fuchsia-300" />
+                                                         <button type="submit" disabled={!partyGuessInput.trim()} className="min-h-11 rounded-xl bg-fuchsia-300 px-4 text-xs font-black text-[#1b0927] transition-colors hover:bg-fuchsia-200 disabled:cursor-not-allowed disabled:opacity-40">Lock guess</button>
+                                                     </form>
+                                                 )
+                                             ) : (
+                                                 <div className="mt-3 rounded-xl border border-amber-300/20 bg-amber-400/10 px-3 py-3 text-center text-xs font-black text-amber-100">{partyGame.status === 'finished' ? 'Final results' : 'Round revealed'}</div>
+                                             )}
+                                             {partyGameNotice && <p className="mt-2 text-[11px] font-bold text-amber-200" role="status">{partyGameNotice}</p>}
+                                             {partyGame.revealed && partyGame.answer && <p className="mt-3 rounded-xl border border-emerald-300/20 bg-emerald-500/10 px-3 py-2 text-xs font-black text-emerald-100">Answer: {partyGame.answer}</p>}
+                                             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-500"><span><strong className="text-amber-200">5</strong> exact</span><span><strong className="text-cyan-200">3</strong> close</span><span><strong className="text-fuchsia-200">1</strong> initials</span><span><strong className="text-gray-300">0</strong> wrong</span></div>
+                                         </div>
+                                         <aside className="rounded-2xl border border-white/10 bg-black/20 p-3">
+                                             <div className="flex items-center justify-between gap-2"><h3 className="text-[10px] font-black uppercase tracking-wider text-fuchsia-100">Leaderboard</h3><span className="text-[9px] font-bold text-gray-500">{partyGame.status === 'finished' ? 'Final' : 'Live'}</span></div>
+                                             <ol className="mt-3 space-y-2">{partyGameLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between gap-2 text-xs text-gray-200"><span className="min-w-0 truncate"><span className={`mr-1.5 inline-flex h-5 w-5 items-center justify-center rounded-md text-[9px] font-black ${index === 0 ? 'bg-amber-400/20 text-amber-200' : 'bg-white/10 text-gray-400'}`}>{index + 1}</span>{name}</span><strong className="text-fuchsia-200">{score}</strong></li>)}</ol>
+                                             {partyGameLeaderboard.length === 0 && <p className="mt-3 text-[11px] text-gray-500">Scores appear after guesses.</p>}
+                                             {partyGame.status === 'finished' && <p className="mt-4 border-t border-white/10 pt-3 text-[11px] font-black text-emerald-200">The room has a winner.</p>}
+                                         </aside>
+                                     </div>
+                                 )}
+                             </section>
+                         </div>
 
                         {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
                          <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 flex flex-col min-h-[420px] h-[min(580px,calc(100dvh-12rem))] lg:h-[580px] shadow-2xl">

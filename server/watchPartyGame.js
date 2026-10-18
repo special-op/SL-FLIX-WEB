@@ -50,8 +50,18 @@ function candidateAnswers(candidate) {
 }
 
 function initialsForTitle(value) {
-    const words = normalizeFullTitle(value).split(/\s+/).filter(Boolean);
-    return words.length > 1 ? words.map(word => word[0]).join('') : '';
+    // Accept both conventional forms: include the leading article (TPB) or
+    // omit it (PB). Punctuation has already become a separator here.
+    const words = normalizeFullTitle(value)
+        .split(/\s+/)
+        .filter(Boolean);
+    if (!words.length) return [];
+    const allWords = words.map(word => word[0]).join('');
+    const meaningfulWords = words
+        .filter(word => !/^(a|an|the)$/.test(word))
+        .map(word => word[0])
+        .join('');
+    return [...new Set([allWords, meaningfulWords].filter(Boolean))];
 }
 
 function compactGuess(value) {
@@ -67,23 +77,23 @@ export function classifyGuess(guess, candidateOrAnswer) {
     const fullTitle = isStringAnswer ? normalizeFullTitle(candidateOrAnswer) : normalizeFullTitle(candidateOrAnswer?.title);
     const answers = isStringAnswer ? [title] : candidateAnswers(candidateOrAnswer);
     const initials = isStringAnswer
-        ? [initialsForTitle(candidateOrAnswer)]
+        ? initialsForTitle(candidateOrAnswer)
         : [candidateOrAnswer?.title, candidateOrAnswer?.canonicalTitle, ...(Array.isArray(candidateOrAnswer?.aliases) ? candidateOrAnswer.aliases : [])]
-            .map(initialsForTitle)
+            .flatMap(initialsForTitle)
             .filter(Boolean);
-    if (!cleanGuess || !answers.length || cleanGuess.length < 2) return { valid: false, exact: false, initials: false, near: false, points: 0, reason: 'invalid_guess' };
-    if (fullGuess === fullTitle) return { valid: true, exact: true, initials: false, near: false, points: 5, reason: 'exact_title' };
+    if (!cleanGuess || !answers.length) return { valid: false, exact: false, initials: false, near: false, points: 0, tier: 'wrong', reason: 'invalid_guess' };
+    if (fullGuess === fullTitle) return { valid: true, exact: true, initials: false, near: false, points: 5, tier: 'exact', reason: 'exact_title' };
     // Alternate/canonical names are valid, but only a full normalized title is
     // eligible for the exact-title bonus.
-    if (answers.slice(1).includes(cleanGuess)) return { valid: true, exact: false, initials: false, near: false, points: 3, reason: 'canonical_or_alias' };
-    if (initials.includes(compactGuess(guess))) return { valid: true, exact: false, initials: true, near: false, points: 1, reason: 'initials' };
+    if (answers.slice(1).includes(cleanGuess)) return { valid: true, exact: false, initials: false, near: false, points: 3, tier: 'close', reason: 'canonical_or_alias' };
+    if (initials.includes(compactGuess(guess))) return { valid: true, exact: false, initials: true, near: false, points: 1, tier: 'initial', reason: 'initials' };
 
     const near = answers.some(answer => {
         if (cleanGuess.length >= 3 && (answer.includes(cleanGuess) || cleanGuess.includes(answer))) return true;
         const threshold = answer.length > 12 ? 3 : 2;
         return answer.length > 6 && editDistance(cleanGuess, answer) <= threshold;
     });
-    return { valid: near, exact: false, initials: false, near, points: near ? 3 : 0, reason: near ? 'near_match' : 'incorrect' };
+    return { valid: near, exact: false, initials: false, near, points: near ? 3 : 0, tier: near ? 'close' : 'wrong', reason: near ? 'near_match' : 'incorrect' };
 }
 
 export function scoreGuess(guess, candidateOrAnswer) {
@@ -306,4 +316,258 @@ export function scoreTriviaAnswer(game, playerName, answerIndex) {
     if (!correct) game.failedAnswers.push({ username: playerName, answerIndex, reason: 'incorrect', at: Date.now() });
     game.scores[playerName] = Number(game.scores[playerName] || 0) + points;
     return { accepted: true, correct, points, reason: correct ? 'correct' : 'incorrect' };
+}
+
+// ---------------------------------------------------------------------------
+// Generic watch-party games
+// ---------------------------------------------------------------------------
+
+const PARTY_GAME_TYPES = ['emoji', 'quote', 'character', 'scramble'];
+const PARTY_GAME_MAX_ROUNDS = 50;
+const PARTY_GAME_MAX_ROUND_MS = 120_000;
+const PARTY_GAME_MIN_ROUND_MS = 1_000;
+const TITLE_ARTICLES = new Set(['a', 'an', 'the']);
+
+function boundedText(value, max = 500) {
+    return String(value ?? '').trim().slice(0, max);
+}
+
+function safePartyCandidate(candidate, index = 0) {
+    if (!candidate || typeof candidate !== 'object') return null;
+    const title = boundedText(candidate.title || candidate.name, 160);
+    if (!title) return null;
+    const aliases = Array.isArray(candidate.aliases)
+        ? candidate.aliases.map(alias => boundedText(alias, 160)).filter(Boolean).slice(0, 10)
+        : [];
+    const quote = boundedText(candidate.quote || candidate.tagline || candidate.line || (Array.isArray(candidate.quotes) ? candidate.quotes[0] : ''), 500);
+    const emoji = boundedText(candidate.emoji || candidate.emojis, 80);
+    return {
+        id: boundedText(candidate.id || `party-candidate-${index + 1}`, 100),
+        title,
+        ...(candidate.canonicalTitle ? { canonicalTitle: boundedText(candidate.canonicalTitle, 160) } : {}),
+        ...(aliases.length ? { aliases } : {}),
+        ...(candidate.posterUrl || candidate.imageUrl ? { imageUrl: boundedText(candidate.posterUrl || candidate.imageUrl, 1000) } : {}),
+        ...(candidate.category ? { category: boundedText(candidate.category, 64) } : {}),
+        ...(candidate.contentType || candidate.type ? { contentType: boundedText(candidate.contentType || candidate.type, 32) } : {}),
+        ...(quote ? { quote } : {}),
+        ...(emoji ? { emoji } : {})
+    };
+}
+
+function safePartyCharacters(characters, fallbackTitle = '') {
+    if (!Array.isArray(characters)) return [];
+    return characters.map((character, index) => {
+        if (!character || typeof character !== 'object') return null;
+        const name = boundedText(character.character || character.characterName || character.name || character.role, 120);
+        const title = boundedText(character.title || character.movieTitle || character.movie?.title || fallbackTitle, 160);
+        if (!name || !title) return null;
+        return {
+            id: boundedText(character.id || `party-character-${index + 1}`, 100),
+            name,
+            title,
+            imageUrl: boundedText(character.imageUrl || character.profileUrl || character.profile_path || character.posterUrl, 1000),
+            category: boundedText(character.category, 64),
+            contentType: boundedText(character.contentType || character.type || 'movie', 32)
+        };
+    }).filter(Boolean).slice(0, 100);
+}
+
+function titleWords(value) {
+    return normalizeFullTitle(value).split(/\s+/).filter(word => word && !TITLE_ARTICLES.has(word));
+}
+
+const WORD_EMOJI = new Map([
+    ['star', '⭐'], ['love', '❤️'], ['night', '🌙'], ['day', '☀️'], ['man', '🧔'],
+    ['woman', '👩'], ['girl', '👧'], ['boy', '👦'], ['king', '👑'], ['queen', '👸'],
+    ['war', '⚔️'], ['world', '🌍'], ['space', '🚀'], ['home', '🏠'], ['city', '🏙️'],
+    ['school', '🏫'], ['road', '🛣️'], ['dark', '🌑'], ['red', '🔴'], ['blue', '🔵'],
+    ['ghost', '👻'], ['life', '🌱'], ['dead', '💀'], ['time', '⏰'], ['dream', '💭'],
+    ['fire', '🔥'], ['water', '💧'], ['heart', '❤️'], ['dragon', '🐉'], ['game', '🎮']
+]);
+
+function emojiForTitle(title) {
+    const mapped = titleWords(title).map(word => WORD_EMOJI.get(word)).filter(Boolean);
+    if (mapped.length) return mapped.slice(0, 6).join(' ');
+    // A stable fallback is preferable to accepting arbitrary client markup.
+    const symbols = ['🎬', '✨', '🍿', '🎭', '🌟', '🔍'];
+    const seed = [...normalizeFullTitle(title)].reduce((sum, char) => sum + char.charCodeAt(0), 0);
+    return `${symbols[seed % symbols.length]} ${symbols[(seed + 2) % symbols.length]}`;
+}
+
+function scrambleTitle(title, seed = 0) {
+    const chars = [...String(title)];
+    if (chars.length < 2) return chars.join('');
+    const offset = (seed + chars.length) % chars.length;
+    const rotated = chars.slice(offset).concat(chars.slice(0, offset));
+    const scrambled = rotated.reverse().join('');
+    return scrambled === title ? chars.slice(1).concat(chars[0]).join('') : scrambled;
+}
+
+function safeRoundCount(value, fallback = 5) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.min(PARTY_GAME_MAX_ROUNDS, Math.max(1, Math.floor(number)));
+}
+
+function safeRoundMs(value, fallback = 20_000) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return fallback;
+    return Math.min(PARTY_GAME_MAX_ROUND_MS, Math.max(PARTY_GAME_MIN_ROUND_MS, Math.floor(number)));
+}
+
+function partyRoundForType(type, candidate, character, index) {
+    const isCharacterRound = type === 'character' && Boolean(character?.name);
+    const answer = isCharacterRound ? character.name : (candidate?.title || '');
+    const base = {
+        id: `${type}-${index + 1}`,
+        roundType: type,
+        answer,
+        canonicalTitle: isCharacterRound ? '' : (candidate?.canonicalTitle || ''),
+        aliases: isCharacterRound ? [] : (candidate?.aliases || []),
+        imageUrl: boundedText(character?.imageUrl || candidate?.imageUrl, 1000),
+        category: boundedText(character?.category || candidate?.category, 64),
+        contentType: boundedText(character?.contentType || candidate?.contentType, 32)
+    };
+    if (type === 'emoji') {
+        const clue = candidate?.emoji || emojiForTitle(answer);
+        return { ...base, prompt: 'Guess the movie from these emojis.', clue };
+    }
+    if (type === 'quote') {
+        const clue = candidate?.quote || 'Name the movie this quote comes from.';
+        return { ...base, prompt: 'Which movie is this quote from?', clue };
+    }
+    if (type === 'character') {
+        return {
+            ...base,
+            prompt: 'Who is this character?',
+            clue: character?.imageUrl ? 'Identify the character from the image.' : `Character from ${character?.title || 'the selected title'}`
+        };
+    }
+    return { ...base, prompt: 'Unscramble the movie title.', clue: scrambleTitle(answer, index) };
+}
+
+function normalizePartyOptions(options = {}) {
+    const movie = safePartyCandidate(options.movie, 0);
+    const candidates = (Array.isArray(options.candidates) ? options.candidates : [])
+        .slice(0, 50)
+        .map((candidate, index) => safePartyCandidate(candidate, index))
+        .filter(Boolean);
+    if (movie && !candidates.some(candidate => normalizeGuess(candidate.title) === normalizeGuess(movie.title))) candidates.unshift(movie);
+    const characters = safePartyCharacters(
+        Array.isArray(options.characters) ? options.characters : (options.movie?.characters || options.movie?.cast),
+        movie?.title || ''
+    );
+    const requestedRounds = options.rounds === 'custom'
+        ? (options.customRounds ?? options.maxRounds)
+        : options.rounds;
+    return {
+        type: options.gameType === 'mixed' || PARTY_GAME_TYPES.includes(options.gameType) ? options.gameType : 'emoji',
+        rounds: safeRoundCount(requestedRounds),
+        roundMs: safeRoundMs(options.roundMs),
+        candidates,
+        characters
+    };
+}
+
+/** Build all answer-bearing data on the server; callers must use getPublicPartyGame for clients. */
+export function createPartyGame(options = {}, now = Date.now()) {
+    const normalized = normalizePartyOptions(options);
+    const sourceCandidates = normalized.candidates;
+    const sourceCharacters = normalized.characters;
+    const rounds = [];
+    for (let index = 0; index < normalized.rounds; index += 1) {
+        const roundType = normalized.type === 'mixed' ? PARTY_GAME_TYPES[index % PARTY_GAME_TYPES.length] : normalized.type;
+        const candidate = sourceCandidates[index % sourceCandidates.length];
+        const character = sourceCharacters.length ? sourceCharacters[index % sourceCharacters.length] : null;
+        const selectedCandidate = candidate || (character ? safePartyCandidate({ title: character.title, id: character.id, category: character.category, contentType: character.contentType, imageUrl: character.imageUrl }) : null);
+        if (!selectedCandidate) break;
+        rounds.push(partyRoundForType(roundType, selectedCandidate, roundType === 'character' ? character : null, index));
+    }
+    const effectiveRounds = rounds.length;
+    const first = rounds[0];
+    return {
+        type: 'party_game',
+        gameType: normalized.type,
+        status: first ? 'active' : 'finished',
+        round: first ? 1 : 0,
+        maxRounds: effectiveRounds,
+        startedAt: now,
+        endsAt: first ? now + normalized.roundMs : now,
+        roundMs: normalized.roundMs,
+        rounds,
+        currentRound: 0,
+        scores: {},
+        submissions: {},
+        attempts: [],
+        revealed: false,
+        timer: null
+    };
+}
+
+export function nextPartyGameRound(previous, now = Date.now()) {
+    if (!previous || previous.round >= previous.maxRounds) return null;
+    const nextRound = previous.currentRound + 1;
+    return {
+        ...previous,
+        status: 'active',
+        round: nextRound + 1,
+        currentRound: nextRound,
+        startedAt: now,
+        endsAt: now + safeRoundMs(previous.roundMs),
+        submissions: {},
+        attempts: [],
+        revealed: false,
+        timer: null
+    };
+}
+
+export function getPublicPartyGame(game) {
+    if (!game) return null;
+    const round = game.rounds?.[game.currentRound];
+    const publicGame = {
+        type: 'party_game',
+        status: game.status,
+        gameType: game.gameType,
+        round: game.round,
+        maxRounds: game.maxRounds,
+        startedAt: game.startedAt,
+        endsAt: game.endsAt,
+        prompt: round?.prompt || '',
+        clue: round?.clue || '',
+        imageUrl: round?.imageUrl || '',
+        category: round?.category || undefined,
+        contentType: round?.contentType || undefined,
+        ...(round?.roundType ? { roundType: round.roundType } : {}),
+        scores: { ...(game.scores || {}) },
+        revealed: Boolean(game.revealed || game.status !== 'active')
+    };
+    if (publicGame.revealed && round) {
+        publicGame.answer = round.answer;
+    }
+    return publicGame;
+}
+
+export function scorePartyGameGuess(game, playerName, guess, now = Date.now()) {
+    if (!game || game.status !== 'active' || !playerName) return { accepted: false, points: 0, tier: 'wrong', reason: 'inactive_game' };
+    const key = normalizeDisplayNameForGame(playerName);
+    if (!key) return { accepted: false, points: 0, tier: 'wrong', reason: 'invalid_player' };
+    if (game.submissions?.[key]) return { accepted: false, duplicate: true, points: 0, tier: 'wrong', reason: 'already_submitted' };
+    const round = game.rounds?.[game.currentRound];
+    if (!round) return { accepted: false, points: 0, tier: 'wrong', reason: 'missing_round' };
+    const result = classifyGuess(guess, { title: round.answer, canonicalTitle: round.canonicalTitle, aliases: round.aliases });
+    game.submissions = game.submissions || {};
+    game.submissions[key] = { username: boundedText(playerName, 40), at: now, points: result.points, tier: result.tier };
+    game.attempts = Array.isArray(game.attempts) ? game.attempts : [];
+    game.attempts.push({ username: boundedText(playerName, 40), points: result.points, tier: result.tier, at: now });
+    game.scores[playerName] = Number(game.scores[playerName] || 0) + result.points;
+    return { accepted: true, points: result.points, tier: result.tier, reason: result.reason, scores: { ...game.scores } };
+}
+
+function normalizeDisplayNameForGame(value) {
+    return boundedText(value, 40).toLocaleLowerCase();
+}
+
+export function cleanupPartyGame(room) {
+    if (room?.partyGame?.timer) clearTimeout(room.partyGame.timer);
+    if (room && Object.prototype.hasOwnProperty.call(room, 'partyGame')) delete room.partyGame;
 }

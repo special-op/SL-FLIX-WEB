@@ -17,7 +17,7 @@ import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
 import { getNormalizedChannels } from './server/iptvStorage.js';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
-import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, classifyGuess, nextGuessPosterRound, createMovieTriviaGame, getPublicMovieTriviaGame, scoreTriviaAnswer } from './server/watchPartyGame.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, classifyGuess, nextGuessPosterRound, createMovieTriviaGame, getPublicMovieTriviaGame, scoreTriviaAnswer, cleanupPartyGame, createPartyGame, getPublicPartyGame, nextPartyGameRound, scorePartyGameGuess } from './server/watchPartyGame.js';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -131,6 +131,10 @@ const MOVIE_TRIVIA_MAX_QUESTIONS = 20;
 const MOVIE_TRIVIA_MAX_PLAYERS = 12;
 const MOVIE_TRIVIA_ROUND_MS = 20 * 1000;
 const MOVIE_TRIVIA_REVEAL_MS = 3 * 1000;
+const PARTY_GAME_MAX_PLAYERS = 20;
+const PARTY_GAME_ROUND_MS = 20 * 1000;
+const PARTY_GAME_REVEAL_MS = 3 * 1000;
+const PARTY_GAME_MAX_GUESS_LENGTH = 80;
 
 function clearGuessPosterGame(room) {
     if (room?.guessPosterGame?.timer) clearTimeout(room.guessPosterGame.timer);
@@ -142,6 +146,11 @@ function clearMovieTriviaGame(room) {
     if (room && Object.prototype.hasOwnProperty.call(room, 'movieTriviaGame')) delete room.movieTriviaGame;
 }
 
+function clearPartyGame(room) {
+    if (room?.partyGame?.timer) clearTimeout(room.partyGame.timer);
+    cleanupPartyGame(room);
+}
+
 function recordGuessAttempt(game, attempt) {
     game.attempts = Array.isArray(game.attempts) ? game.attempts : [];
     game.attempts.push(attempt);
@@ -149,7 +158,7 @@ function recordGuessAttempt(game, attempt) {
 }
 
 function publicRoomWithGame(room) {
-    const { guessPosterGame, movieTriviaGame, reconnectGrace, hostToken, pendingRequests, ...publicRoom } = room;
+    const { guessPosterGame, movieTriviaGame, partyGame, reconnectGrace, hostToken, pendingRequests, ...publicRoom } = room;
     const safeRoom = {
         ...publicRoom,
         privacy: room.privacy === 'private' ? 'private' : 'public',
@@ -163,6 +172,7 @@ function publicRoomWithGame(room) {
         safeRoom.movieTriviaGame = publicTrivia;
         safeRoom.triviaGame = publicTrivia;
     }
+    if (partyGame) safeRoom.partyGame = getPublicPartyGame(partyGame);
     return safeRoom;
 }
 
@@ -205,6 +215,7 @@ setInterval(() => {
             io.in(roomId).socketsLeave(roomId);
             clearGuessPosterGame(room);
             clearMovieTriviaGame(room);
+            clearPartyGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
             continue;
@@ -214,6 +225,7 @@ setInterval(() => {
         if ((isEmpty && now - (room.updatedAt || now) > ROOM_EMPTY_GRACE_MS) || (now - (room.updatedAt || now) > 12 * 60 * 60 * 1000)) {
             clearGuessPosterGame(room);
             clearMovieTriviaGame(room);
+            clearPartyGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
         }
@@ -450,6 +462,43 @@ function revealMovieTriviaRound(roomId) {
     game.timer = setTimeout(() => startNextMovieTriviaRound(roomId), MOVIE_TRIVIA_REVEAL_MS);
 }
 
+function schedulePartyGameRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.partyGame;
+    if (!room || !game || game.status !== 'active') return;
+    if (game.timer) clearTimeout(game.timer);
+    game.timer = setTimeout(() => revealPartyGameRound(roomId), Math.max(0, game.endsAt - Date.now()));
+}
+
+function startNextPartyGameRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const previous = room?.partyGame;
+    if (!room || !previous || previous.round >= previous.maxRounds) return;
+    const next = nextPartyGameRound(previous, Date.now());
+    if (!next) return;
+    room.partyGame = { ...next, scores: { ...previous.scores } };
+    io.to(roomId).emit('party_game_round_started', { game: getPublicPartyGame(room.partyGame) });
+    broadcastActiveRooms();
+    schedulePartyGameRound(roomId);
+}
+
+function revealPartyGameRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.partyGame;
+    if (!room || !game || game.status !== 'active') return;
+    game.status = 'reveal';
+    game.revealed = true;
+    game.timer = null;
+    io.to(roomId).emit('party_game_round_revealed', { game: getPublicPartyGame(game) });
+    broadcastActiveRooms();
+    if (game.round >= game.maxRounds) {
+        game.status = 'finished';
+        io.to(roomId).emit('party_game_finished', { game: getPublicPartyGame(game) });
+        return;
+    }
+    game.timer = setTimeout(() => startNextPartyGameRound(roomId), PARTY_GAME_REVEAL_MS);
+}
+
 io.on('connection', (socket) => {
     socket.data.identity = Object.freeze({ id: socket.id });
     socket.data.eventTimestamps = [];
@@ -519,6 +568,7 @@ io.on('connection', (socket) => {
             paused: false, // Starts playing continuous real-time movie stream
             guessPosterGame: null,
             movieTriviaGame: null,
+            partyGame: null,
             reconnectGrace: [],
             waitExpiresAt: now + ROOM_WAIT_MS,
             updatedAt: now
@@ -572,7 +622,7 @@ io.on('connection', (socket) => {
                     const previousName = creator.name;
                     creator.id = socket.id;
                     creator.name = cleanUsername;
-                    for (const game of [room.guessPosterGame, room.movieTriviaGame]) {
+                    for (const game of [room.guessPosterGame, room.movieTriviaGame, room.partyGame]) {
                         if (game?.scores && Object.prototype.hasOwnProperty.call(game.scores, previousName)) {
                             game.scores[cleanUsername] = game.scores[previousName];
                             if (previousName !== cleanUsername) delete game.scores[previousName];
@@ -833,6 +883,7 @@ io.on('connection', (socket) => {
                 io.in(cleanRoomId).socketsLeave(cleanRoomId);
                 clearGuessPosterGame(room);
                 clearMovieTriviaGame(room);
+                clearPartyGame(room);
                 watchRooms.delete(cleanRoomId);
                 broadcastActiveRooms();
             } else {
@@ -994,7 +1045,7 @@ io.on('connection', (socket) => {
         });
         recordGuessAttempt(game, { attemptId, username: member.name, guess, points: result.points, reason: result.reason, at: now });
         if (result.points <= 0) {
-            io.to(roomId).emit('guess_poster_attempt', { username: member.name, points: 0, reason: result.reason });
+            io.to(roomId).emit('guess_poster_attempt', { username: member.name, points: 0, tier: result.tier, reason: result.reason });
             const failure = {
                 attemptId,
                 guess,
@@ -1010,6 +1061,7 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('guess_poster_correct', {
             username: member.name,
             points: result.points,
+            tier: result.tier,
             reason: result.reason,
             attemptId,
             scores: { ...game.scores }
@@ -1101,6 +1153,75 @@ io.on('connection', (socket) => {
         if (!room || !isRoomMember(room, socket)?.isCreator) return;
         clearMovieTriviaGame(room);
         io.to(roomId).emit('movie_trivia_ended', { roomId });
+    });
+
+    socket.on('party_game_start', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        if (!room || !member?.isCreator) return socket.emit('error_message', { message: 'Only the host can start a game.' });
+        if (room.users.length < 2) return socket.emit('error_message', { message: 'Party games need at least two room members.' });
+        if (room.partyGame?.status === 'active' || room.partyGame?.status === 'reveal') {
+            return socket.emit('error_message', { message: 'A party game is already running.' });
+        }
+        const gameType = ['emoji', 'quote', 'character', 'scramble', 'mixed'].includes(payload.gameType) ? payload.gameType : 'mixed';
+        const candidates = Array.isArray(payload.candidates) ? payload.candidates.slice(0, 50) : [];
+        const characters = Array.isArray(payload.characters) ? payload.characters.slice(0, 100) : [];
+        const game = createPartyGame({
+            gameType,
+            rounds: payload.rounds,
+            customRounds: payload.customRounds ?? payload.maxRounds,
+            roundMs: payload.roundMs || PARTY_GAME_ROUND_MS,
+            candidates,
+            characters,
+            movie: payload.movie && typeof payload.movie === 'object' ? payload.movie : null
+        }, Date.now());
+        if (!game.maxRounds) return socket.emit('error_message', { message: 'Send at least one valid movie candidate or character.' });
+        game.scores = Object.fromEntries(room.users.slice(0, PARTY_GAME_MAX_PLAYERS).map(user => [user.name, 0]));
+        room.partyGame = game;
+        const event = { game: getPublicPartyGame(game) };
+        io.to(roomId).emit('party_game_started', event);
+        io.to(roomId).emit('party_game_round_started', event);
+        broadcastActiveRooms();
+        schedulePartyGameRound(roomId);
+    });
+
+    socket.on('party_game_submit', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        const game = room?.partyGame;
+        const guess = cleanText(payload.guess, PARTY_GAME_MAX_GUESS_LENGTH);
+        if (!room || !member || !game || game.status !== 'active') return;
+        if (!Object.prototype.hasOwnProperty.call(game.scores, member.name)) return;
+        const now = Date.now();
+        game.guessTimestamps = Array.isArray(game.guessTimestamps) ? game.guessTimestamps : [];
+        const recent = game.guessTimestamps.filter(entry => entry.socketId === socket.id).map(entry => entry.at);
+        const rate = allowGuessRate(recent, now);
+        game.guessTimestamps = game.guessTimestamps.filter(entry => entry.socketId !== socket.id || now - entry.at < 1000);
+        if (!rate.allowed) return socket.emit('error_message', { message: 'Too many guesses. Slow down.' });
+        game.guessTimestamps.push({ socketId: socket.id, at: now });
+        const result = scorePartyGameGuess(game, member.name, guess, now);
+        if (!result.accepted && result.duplicate) return socket.emit('error_message', { message: 'You already submitted this round.' });
+        if (!result.accepted) return socket.emit('error_message', { message: 'That answer was not accepted.' });
+        io.to(roomId).emit('party_game_score', {
+            username: member.name,
+            points: result.points,
+            tier: result.tier,
+            scores: { ...game.scores }
+        });
+    });
+
+    socket.on('party_game_end', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        if (!room || !isRoomMember(room, socket)?.isCreator) return;
+        clearPartyGame(room);
+        io.to(roomId).emit('party_game_ended', { roomId });
+        broadcastActiveRooms();
     });
 
     socket.on('room_chat', (payload) => {

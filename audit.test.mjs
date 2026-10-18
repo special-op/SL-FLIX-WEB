@@ -3,9 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
 import { classifyNetworkQuality, calculateRetryDelay } from './utils/networkQuality.js';
-import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, createMovieTriviaGame, getPublicGuessPosterGame, getPublicMovieTriviaGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess, scoreGuess, scoreTriviaAnswer } from './server/watchPartyGame.js';
+import { allowGuessRate, cleanupGuessPosterGame, classifyGuess, createGuessPosterGame, createMovieTriviaGame, createPartyGame, getPublicGuessPosterGame, getPublicMovieTriviaGame, getPublicPartyGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess, scoreGuess, scorePartyGameGuess, scoreTriviaAnswer } from './server/watchPartyGame.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+const classifyGuessForAudit = (guess, candidate) => {
+  const result = classifyGuess(guess, candidate);
+  return { points: result.points, tier: result.tier };
+};
 test('manifest and lockfile root dependencies agree', () => {
   const manifest = JSON.parse(read('./package.json'));
   const root = JSON.parse(read('./package-lock.json')).packages[''];
@@ -209,6 +213,53 @@ test('guess poster awards five for full title and three for accepted non-full an
   assert.equal(scoreGuess('Princess Bride', candidate), 3);
   assert.equal(scoreGuess('Princess', candidate), 3);
   assert.equal(scoreGuess('Completely Wrong', candidate), 0);
+});
+
+test('title scoring exposes exact, close, initial, and wrong tiers', () => {
+  const candidate = { title: 'The Princess Bride', aliases: ['The PB Movie'] };
+  assert.deepEqual(classifyGuessForAudit('The Princess Bride', candidate), { points: 5, tier: 'exact' });
+  assert.deepEqual(classifyGuessForAudit('Princess', candidate), { points: 3, tier: 'close' });
+  assert.deepEqual(classifyGuessForAudit('PB', candidate), { points: 1, tier: 'initial' });
+  assert.deepEqual(classifyGuessForAudit('TPB', candidate), { points: 1, tier: 'initial' });
+  assert.deepEqual(classifyGuessForAudit('???', candidate), { points: 0, tier: 'wrong' });
+});
+
+test('generic party games cover every type and keep answers private until reveal', () => {
+  const candidates = [
+    { id: 'a', title: 'The Star', quote: 'A safe line', emoji: '⭐' },
+    { id: 'b', title: 'Night Road', quote: 'Another safe line' }
+  ];
+  const characters = [{ id: 'c', name: 'Captain Example', title: 'The Star', imageUrl: '/cast.jpg' }];
+  for (const gameType of ['emoji', 'quote', 'character', 'scramble']) {
+    const game = createPartyGame({ gameType, rounds: 5, roundMs: 5000, candidates, characters }, 1000);
+    const hidden = getPublicPartyGame(game);
+    assert.equal(hidden.gameType, gameType);
+    assert.equal(hidden.revealed, false);
+    assert.equal('answer' in hidden, false);
+    assert.ok(hidden.prompt);
+    game.status = 'reveal';
+    game.revealed = true;
+    assert.ok(getPublicPartyGame(game).answer);
+  }
+  const mixed = createPartyGame({ gameType: 'mixed', rounds: 10, candidates, characters }, 1000);
+  assert.deepEqual(mixed.rounds.slice(0, 4).map(round => round.roundType), ['emoji', 'quote', 'character', 'scramble']);
+  assert.equal(mixed.maxRounds, 10);
+  assert.equal('answer' in getPublicPartyGame(mixed), false);
+  mixed.scores = { Player: 0 };
+  assert.equal(scorePartyGameGuess(mixed, 'Player', 'The Star').points, 5);
+  assert.equal(scorePartyGameGuess(mixed, 'Player', 'The Star').duplicate, true);
+});
+
+test('generic party game server protocol is wired with host lifecycle and privacy events', () => {
+  const server = read('./server.js');
+  assert.match(server, /socket\.on\('party_game_start'/);
+  assert.match(server, /socket\.on\('party_game_submit'/);
+  assert.match(server, /socket\.on\('party_game_end'/);
+  for (const event of ['party_game_started', 'party_game_round_started', 'party_game_score', 'party_game_round_revealed', 'party_game_finished', 'party_game_ended']) {
+    assert.match(server, new RegExp(`['"]${event}['"]`));
+  }
+  assert.match(server, /getPublicPartyGame/);
+  assert.match(server, /clearPartyGame\(room\)/);
 });
 
 test('movie trivia keeps the answer private until reveal and prevents duplicate scoring', () => {
