@@ -150,9 +150,9 @@ const Hero: React.FC<{ movies: MovieResult[], onPlay: (m: MovieResult) => void, 
              <button
                key={idx}
                onClick={() => goToSlide(idx)}
-               className={`relative bg-white/5 w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
+               style={{ display: 'none' }} className={`relative bg-white/5 w-12 md:w-14 min-w-12 min-h-16 md:min-h-20 h-16 md:h-20 rounded-lg overflow-hidden transition-all duration-300 border flex-shrink-0 cursor-pointer touch-target scroll-snap-item ${idx === currentIndex ? 'border-primary scale-110 shadow-[0_0_15px_rgba(0,229,255,0.4)]' : 'border-white/10 opacity-60 hover:opacity-100 hover:scale-105'}`}
              >
-                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} onError={(e) => { const target = e.target as HTMLImageElement; target.onerror = null; target.src = IMAGE_FALLBACK; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading={idx < 8 ? 'eager' : 'lazy'} decoding="async" className="w-full h-full object-cover" />
+                <img src={getOptimizedImageUrl(thumbnail, 100) || IMAGE_FALLBACK} ref={(img) => { if (img && img.complete && img.naturalWidth > 0 && img.parentElement) img.parentElement.style.display = ''; }} onLoad={(e) => { const p = e.currentTarget.parentElement; if (p) p.style.display = ''; }} onError={(e) => { const p = e.currentTarget.parentElement; if (p) p.style.display = 'none'; }} alt={`${movie.title} thumbnail`} width={100} height={150} loading="eager" decoding="async" className="w-full h-full object-cover" />
               {idx === currentIndex && (
                 <div className="absolute inset-0 bg-primary/20 flex items-center justify-center">
                   <div className="w-5 h-5 rounded-full bg-primary flex items-center justify-center"><i className="fa-solid fa-play text-[10px] text-black ml-0.5"></i></div>
