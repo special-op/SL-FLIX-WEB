@@ -55,12 +55,17 @@ interface WatchRoom {
     currentTime: number;
     paused: boolean;
     entryMode: RoomEntryMode;
+    /** Optional fields keep the UI compatible with older watch-party servers. */
+    isPublic?: boolean;
+    public?: boolean;
+    visibility?: 'public' | 'private';
     hostToken?: string;
     waitExpiresAt?: number | null;
     messages?: { id?: string; username: string; message: string; timestamp: number }[];
     kickedUsers?: string[];
     pendingRequests?: { requestId: string; username: string; requestedAt: number }[];
     guessPosterGame?: GuessPosterGame | null;
+    triviaGame?: MovieTriviaGame | null;
 }
 
 interface GuessPosterGame {
@@ -73,6 +78,26 @@ interface GuessPosterGame {
     scores: Record<string, number>;
     revealed: boolean;
     answerTitle?: string;
+    label?: string;
+    category?: string;
+    mediaType?: string;
+    contentType?: string;
+    posterUrls?: string[];
+}
+
+interface MovieTriviaGame {
+    status: 'active' | 'reveal' | 'finished';
+    round: number;
+    maxRounds: number;
+    startedAt: number;
+    endsAt: number;
+    prompt: string;
+    choices: string[];
+    scores: Record<string, number>;
+    revealed?: boolean;
+    answerIndex?: number;
+    correctChoice?: string;
+    category?: string;
 }
 
 export const WatchPartyView: React.FC<{
@@ -93,12 +118,13 @@ export const WatchPartyView: React.FC<{
         }
     });
     const [joinCodeInput, setJoinCodeInput] = useState(() => targetRoomId || '');
-    const [entryTab, setEntryTab] = useState<'create' | 'join'>(() => targetRoomId ? 'join' : 'create');
+    const [entryTab, setEntryTab] = useState<'create' | 'discover' | 'join'>(() => targetRoomId ? 'join' : 'discover');
     const [isCreatingRoom, setIsCreatingRoom] = useState(false);
     const [joinRequestRoomId, setJoinRequestRoomId] = useState<string | null>(null);
     const [username, setUsername] = useState<string>(() => localStorage.getItem('slflix_username') || `Viewer_${Math.floor(Math.random() * 10000)}`);
     const [roomNameInput, setRoomNameInput] = useState('');
     const [createEntryMode, setCreateEntryMode] = useState<RoomEntryMode>('manual');
+    const [createVisibility, setCreateVisibility] = useState<'public' | 'private'>('public');
     const [chatMessages, setChatMessages] = useState<{ id?: string; username: string; message: string; timestamp: number }[]>([]);
     const [chatInput, setChatInput] = useState('');
     const [sidebarTab, setSidebarTab] = useState<'chat' | 'participants'>('chat');
@@ -136,6 +162,7 @@ export const WatchPartyView: React.FC<{
     const [searchQuery, setSearchQuery] = useState('');
     const [isSearching, setIsSearching] = useState(false);
     const [searchResults, setSearchResults] = useState<MovieResult[]>([]);
+    const [posterCandidatePool, setPosterCandidatePool] = useState<MovieResult[]>([]);
     const [selectedMovie, setSelectedMovie] = useState<MovieResult | null>(null);
     const [selectedCategory, setSelectedCategory] = useState('');
     const [isLoadingCategory, setIsLoadingCategory] = useState(false);
@@ -158,15 +185,24 @@ export const WatchPartyView: React.FC<{
     const [loadingStream, setLoadingStream] = useState<boolean>(false);
     const [streamError, setStreamError] = useState<string | null>(null);
     const [guessPosterGame, setGuessPosterGame] = useState<GuessPosterGame | null>(null);
+    const [guessPosterHistory, setGuessPosterHistory] = useState<GuessPosterGame[]>([]);
     const [guessInput, setGuessInput] = useState('');
     const [gameNow, setGameNow] = useState(() => Date.now());
     const [gameNotice, setGameNotice] = useState<string | null>(null);
+    const [triviaGame, setTriviaGame] = useState<MovieTriviaGame | null>(null);
+    const [triviaChoice, setTriviaChoice] = useState<number | null>(null);
+    const [triviaNotice, setTriviaNotice] = useState<string | null>(null);
+    const [triviaError, setTriviaError] = useState<string | null>(null);
+    const [isStartingTrivia, setIsStartingTrivia] = useState(false);
+    const triviaStartingRef = useRef(false);
     const offlineChatQueueRef = useRef<{ message: string; queuedAt: number }[]>([]);
     useEffect(() => {
-        if (!guessPosterGame || guessPosterGame.status !== 'active') return;
+        const posterActive = guessPosterGame?.status === 'active';
+        const triviaActive = triviaGame?.status === 'active';
+        if (!posterActive && !triviaActive) return;
         const timer = window.setInterval(() => setGameNow(Date.now()), 250);
         return () => window.clearInterval(timer);
-    }, [guessPosterGame?.status, guessPosterGame?.endsAt]);
+    }, [guessPosterGame?.status, guessPosterGame?.endsAt, triviaGame?.status, triviaGame?.endsAt]);
 
     // Initialize Socket
     useEffect(() => {
@@ -201,8 +237,10 @@ export const WatchPartyView: React.FC<{
              createInFlightRef.current = false;
              setJoinRequestRoomId(null);
              setWaitExpiresAt(room.waitExpiresAt ?? null);
-            setCurrentRoom(room);
-            setGuessPosterGame(room.guessPosterGame || null);
+             setCurrentRoom(room);
+             setGuessPosterGame(room.guessPosterGame || null);
+             setGuessPosterHistory(room.guessPosterGame ? [room.guessPosterGame] : []);
+             setTriviaGame(room.triviaGame || null);
             if (room.hostToken) {
                 try {
                     localStorage.setItem(`slflix_host_token_${room.roomId}`, room.hostToken);
@@ -351,10 +389,13 @@ export const WatchPartyView: React.FC<{
                 setCurrentRoom(null);
                 setSelectedMovie(null);
                 setSources([]);
-                setSubtitles([]);
-                setChatMessages([]);
-                setGuessPosterGame(null);
-                setPauseNotice(null);
+                 setSubtitles([]);
+                 setChatMessages([]);
+                 setGuessPosterGame(null);
+                 setGuessPosterHistory([]);
+                 setTriviaGame(null);
+                 setTriviaNotice(null);
+                 setPauseNotice(null);
                 window.history.pushState({}, '', '/watch-party');
                 s.emit('get_active_rooms');
             }, 1200);
@@ -363,8 +404,13 @@ export const WatchPartyView: React.FC<{
          s.on('error_message', (data: { message: string }) => {
              setIsCreatingRoom(false);
              createInFlightRef.current = false;
-             setJoinRequestRoomId(null);
-             setJoinRequestState(prev => prev === 'submitting' ? 'idle' : prev);
+                 setJoinRequestRoomId(null);
+                 setJoinRequestState(prev => prev === 'submitting' ? 'idle' : prev);
+             if (triviaStartingRef.current) {
+                 setTriviaError(data.message || 'Movie Trivia could not start. Try again.');
+                 setIsStartingTrivia(false);
+                 triviaStartingRef.current = false;
+             }
              setPauseNotice(data.message || 'Error occurred');
             setTimeout(() => setPauseNotice(null), 3500);
         });
@@ -401,28 +447,69 @@ export const WatchPartyView: React.FC<{
             }
         });
 
-        s.on('guess_poster_started', (data: { game: GuessPosterGame }) => {
-            setGuessPosterGame(data.game);
-            setGuessInput('');
-            setGameNotice(null);
+         s.on('guess_poster_started', (data: { game: GuessPosterGame }) => {
+             setGuessPosterGame(data.game);
+             setGuessPosterHistory(prev => [...prev.filter(item => item.round !== data.game.round), data.game].slice(-6));
+             setGuessInput('');
+             setGameNotice(null);
         });
         s.on('guess_poster_correct', (data: { username: string; points: number; scores: Record<string, number> }) => {
             setGuessPosterGame(prev => prev ? { ...prev, scores: data.scores } : prev);
             setGameNotice(`${data.username} scored ${data.points} point${data.points === 1 ? '' : 's'}`);
             window.setTimeout(() => setGameNotice(null), 2500);
         });
-        s.on('guess_poster_round_revealed', (data: { game: GuessPosterGame }) => {
-            setGuessPosterGame(data.game);
-            setGameNotice(`Answer: ${data.game.answerTitle || 'revealed'}`);
+         s.on('guess_poster_round_revealed', (data: { game: GuessPosterGame }) => {
+             setGuessPosterGame(data.game);
+             setGuessPosterHistory(prev => [...prev.filter(item => item.round !== data.game.round), data.game].slice(-6));
+             setGameNotice(`Answer: ${data.game.answerTitle || 'revealed'}`);
         });
-        s.on('guess_poster_finished', (data: { game: GuessPosterGame }) => {
-            setGuessPosterGame(data.game);
-            setGameNotice('Game complete — final leaderboard');
+         s.on('guess_poster_finished', (data: { game: GuessPosterGame }) => {
+             setGuessPosterGame(data.game);
+             setGuessPosterHistory(prev => [...prev.filter(item => item.round !== data.game.round), data.game].slice(-6));
+             setGameNotice('Game complete — final leaderboard');
         });
-        s.on('guess_poster_ended', () => {
-            setGuessPosterGame(null);
-            setGameNotice(null);
-        });
+         s.on('guess_poster_ended', () => {
+             setGuessPosterGame(null);
+             setGuessPosterHistory([]);
+             setGameNotice(null);
+         });
+
+         // Movie Trivia is intentionally event-compatible with both the descriptive
+         // movie_trivia_* names and the shorter trivia_* names used by older servers.
+         const applyTriviaGame = (game: MovieTriviaGame | undefined, notice?: string) => {
+             if (!game) return;
+             setTriviaGame(game);
+             setTriviaChoice(null);
+             setIsStartingTrivia(false);
+             triviaStartingRef.current = false;
+             setTriviaError(null);
+             if (notice) {
+                 setTriviaNotice(notice);
+                 window.setTimeout(() => setTriviaNotice(null), 2500);
+             }
+         };
+         const triviaStarted = (data: { game?: MovieTriviaGame }) => applyTriviaGame(data?.game);
+         const triviaReveal = (data: { game?: MovieTriviaGame }) => applyTriviaGame(data?.game, 'Round revealed — check the scoreboard.');
+         const triviaFinished = (data: { game?: MovieTriviaGame }) => applyTriviaGame(data?.game, 'Trivia complete — final leaderboard.');
+         s.on('movie_trivia_started', triviaStarted);
+         s.on('trivia_started', triviaStarted);
+         s.on('movie_trivia_round_started', triviaStarted);
+         s.on('movie_trivia_round_revealed', triviaReveal);
+         s.on('trivia_round_revealed', triviaReveal);
+         s.on('movie_trivia_finished', triviaFinished);
+         s.on('trivia_finished', triviaFinished);
+         const triviaAnswered = (data: { username?: string; points?: number; scores?: Record<string, number> }) => {
+             if (data?.scores) setTriviaGame(prev => prev ? { ...prev, scores: data.scores! } : prev);
+             if (data?.username) {
+                 setTriviaNotice(`${data.username} answered${typeof data.points === 'number' ? ` for ${data.points} point${data.points === 1 ? '' : 's'}` : ''}.`);
+                 window.setTimeout(() => setTriviaNotice(null), 2200);
+             }
+         };
+         s.on('movie_trivia_answered', triviaAnswered);
+         s.on('trivia_answered', triviaAnswered);
+         const triviaEnded = () => { setTriviaGame(null); setTriviaNotice(null); };
+         s.on('movie_trivia_ended', triviaEnded);
+         s.on('trivia_ended', triviaEnded);
 
         s.on('room_chat_message', (msg: { id?: string; username: string; message: string; timestamp: number }) => {
             setChatMessages(prev => {
@@ -475,6 +562,7 @@ export const WatchPartyView: React.FC<{
     }, [chatMessages]);
 
     const isCreator = Boolean(currentRoom && socket?.id && currentRoom.users.find(u => u.id === socket.id)?.isCreator);
+    const isRoomPublic = (room: WatchRoom) => room.isPublic ?? room.public ?? room.visibility !== 'private';
 
     // Load sources when selected movie / episode changes
     useEffect(() => {
@@ -550,7 +638,13 @@ export const WatchPartyView: React.FC<{
         setIsSearching(true);
         try {
             const res = await ApiService.search(q.trim(), 1);
-            setSearchResults(res.results || []);
+            const results = res.results || [];
+            setSearchResults(results);
+            setPosterCandidatePool(prev => {
+                const byId = new Map(prev.map((movie: MovieResult) => [movie.subjectId || movie.detailPath || movie.title, movie]));
+                results.forEach((movie: MovieResult) => byId.set(movie.subjectId || movie.detailPath || movie.title, movie));
+                return Array.from(byId.values()).slice(-30);
+            });
         } catch (e) {
             setSearchResults([]);
         } finally {
@@ -630,6 +724,9 @@ export const WatchPartyView: React.FC<{
             roomName: roomNameInput.trim(),
             username,
             entryMode: createEntryMode,
+            isPublic: createVisibility === 'public',
+            public: createVisibility === 'public',
+            visibility: createVisibility,
             movie: selectedMovie || { title: 'Choose a title to begin', cover: WATCH_PARTY_FALLBACK, thumbnail: WATCH_PARTY_FALLBACK, subjectId: 'demo' },
             season: selectedSeason,
             episode: selectedEpisode
@@ -698,7 +795,13 @@ export const WatchPartyView: React.FC<{
         setIsLoadingCategory(true);
         try {
             const result = await ApiService.getRankingList(category, 1, 12);
-            setSearchResults(result.results || []);
+            const results = result.results || [];
+            setSearchResults(results);
+            setPosterCandidatePool(prev => {
+                const byId = new Map(prev.map((movie: MovieResult) => [movie.subjectId || movie.detailPath || movie.title, movie]));
+                results.forEach((movie: MovieResult) => byId.set(movie.subjectId || movie.detailPath || movie.title, movie));
+                return Array.from(byId.values()).slice(-30);
+            });
         } catch (e) {
             setSearchResults([]);
         } finally {
@@ -837,12 +940,29 @@ export const WatchPartyView: React.FC<{
     };
 
     const getGuessPosterCandidates = () => {
-        const byId = new Map<string, { id: string; title: string; posterUrl: string }>();
-        [selectedMovie, currentRoom?.movie, ...searchResults].forEach((movie: any) => {
+        const byId = new Map<string, { id: string; title: string; posterUrl: string; contentType?: string; category?: string }>();
+        const selectedType = String(selectedMovie?.type || currentRoom?.movie?.type || '').toLowerCase();
+        const canUseCharacterCandidates = selectedCategory === 'movies'
+            || selectedCategory === 'anime'
+            || selectedType.includes('movie')
+            || selectedType.includes('anime');
+        const characterCandidates = canUseCharacterCandidates
+            ? (movieDetails?.cast || []).map((cast: any) => ({
+                id: `character:${cast?.id || cast?.character || cast?.name || ''}`,
+                title: String(cast?.character || cast?.name || '').trim(),
+                posterUrl: String(cast?.avatar || '').trim(),
+                contentType: 'character',
+                category: selectedCategory || (selectedType.includes('anime') ? 'anime' : 'movie')
+            }))
+            : [];
+        [currentRoom?.movie, selectedMovie, ...posterCandidatePool, ...searchResults, ...characterCandidates].forEach((movie: any) => {
             const id = String(movie?.subjectId || movie?.id || movie?.detailPath || '');
             const title = String(movie?.title || movie?.name || '').trim();
             const posterUrl = String(movie?.cover || movie?.thumbnail || movie?.posterUrl || '');
-            if (id && title) byId.set(id, { id, title, posterUrl });
+            const rawType = String(movie?.contentType || movie?.mediaType || movie?.type || '').trim();
+            const contentType = rawType || (selectedCategory === 'anime' ? 'anime' : selectedCategory === 'movies' ? 'movie' : '');
+            const category = String(movie?.category || selectedCategory || '').trim();
+            if (id && title) byId.set(id, { id, title, posterUrl, ...(contentType ? { contentType } : {}), ...(category ? { category } : {}) });
         });
         return Array.from(byId.values()).slice(0, 30);
     };
@@ -850,6 +970,30 @@ export const WatchPartyView: React.FC<{
     const handleStartGuessPoster = () => {
         if (!socket || !currentRoom || !isCreator) return;
         socket.emit('guess_poster_start', { roomId: currentRoom.roomId, candidates: getGuessPosterCandidates() });
+    };
+
+    const handleStartTrivia = () => {
+        if (!socket || !currentRoom || !isCreator || isStartingTrivia) return;
+        setIsStartingTrivia(true);
+        triviaStartingRef.current = true;
+        setTriviaError(null);
+        socket.emit('movie_trivia_start', {
+            roomId: currentRoom.roomId,
+            movie: selectedMovie || currentRoom.movie,
+            candidates: getGuessPosterCandidates(),
+            maxRounds: 5
+        });
+    };
+
+    const handleTriviaSubmit = (choice: number) => {
+        if (!socket || !currentRoom || !triviaGame || triviaGame.status !== 'active') return;
+        setTriviaChoice(choice);
+        socket.emit('movie_trivia_submit', { roomId: currentRoom.roomId, choice, answerIndex: choice });
+    };
+
+    const handleEndTrivia = () => {
+        if (!socket || !currentRoom || !isCreator) return;
+        socket.emit('movie_trivia_end', { roomId: currentRoom.roomId });
     };
 
     const handleGuessSubmit = (e: React.FormEvent) => {
@@ -866,12 +1010,19 @@ export const WatchPartyView: React.FC<{
     const gameLeaderboard = guessPosterGame
         ? Object.entries(guessPosterGame.scores).sort(([, left], [, right]) => right - left)
         : [];
+    const triviaRemainingSeconds = triviaGame?.status === 'active'
+        ? Math.max(0, Math.ceil((triviaGame.endsAt - gameNow) / 1000))
+        : 0;
+    const triviaLeaderboard = triviaGame
+        ? Object.entries(triviaGame.scores || {}).sort(([, left], [, right]) => right - left)
+        : [];
 
     const formatSeconds = (sec: number) => {
         const m = Math.floor(sec / 60);
         const s = Math.floor(sec % 60);
         return `${m}:${s < 10 ? '0' : ''}${s}`;
     };
+    const isDiscoverTab = entryTab === 'discover';
 
     return (
         <div className="min-h-screen bg-[#07080d] text-white pt-6 pb-20 px-4 sm:px-8 mobile-content-safe">
@@ -922,11 +1073,20 @@ export const WatchPartyView: React.FC<{
                              >
                                  <i className="fa-solid fa-circle-plus mr-1.5"></i>Create party
                              </button>
-                             <button
-                                 type="button"
-                                 role="tab"
-                                 aria-selected={entryTab === 'join'}
-                                 onClick={() => setEntryTab('join')}
+                              <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={entryTab === 'discover'}
+                                  onClick={() => { setEntryTab('discover'); setTargetRoomId(null); setJoinRequestRoomId(null); setJoinRequestState('idle'); window.history.pushState({}, '', '/watch-party'); }}
+                                  className={`min-h-10 rounded-lg px-3 text-xs font-black transition-colors ${entryTab === 'discover' ? 'bg-cyan-500 text-black' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}
+                              >
+                                  <i className="fa-solid fa-compass mr-1.5"></i>Discover
+                              </button>
+                              <button
+                                  type="button"
+                                  role="tab"
+                                  aria-selected={entryTab === 'join'}
+                                  onClick={() => setEntryTab('join')}
                                  className={`min-h-10 rounded-lg px-3 text-xs font-black transition-colors ${entryTab === 'join' ? 'bg-cyan-500 text-black' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}
                              >
                                  <i className="fa-solid fa-ticket mr-1.5"></i>Join by code
@@ -948,7 +1108,7 @@ export const WatchPartyView: React.FC<{
                              </form>
                          )}
                      </div>
-                     {entryTab === 'join' ? (
+                      {entryTab === 'join' ? (
                          targetRoomId ? (
                              <div className="mx-auto max-w-2xl rounded-3xl border border-cyan-500/30 bg-[#121322] p-5 shadow-2xl sm:p-7">
                                  {(() => {
@@ -985,7 +1145,49 @@ export const WatchPartyView: React.FC<{
                                      );
                                  })()}
                              </div>
-                         ) : (
+                       ) : isDiscoverTab ? (
+                      <div className="grid grid-cols-1 gap-6">
+                          <div className="rounded-3xl border border-cyan-500/20 bg-[#121322] p-5 shadow-2xl sm:p-6">
+                              <div className="flex flex-wrap items-end justify-between gap-3">
+                                  <div>
+                                      <p className="text-[10px] font-black uppercase tracking-[0.22em] text-cyan-300">Discover</p>
+                                      <h2 className="mt-1 text-xl font-black text-white">Public watch parties</h2>
+                                      <p className="mt-1 max-w-xl text-xs text-gray-400">Browse rooms that chose to be discoverable. Private rooms stay invite-only — use Join by code when a host shares one.</p>
+                                  </div>
+                                  <button type="button" onClick={() => setEntryTab('create')} className="min-h-10 rounded-xl border border-cyan-500/30 bg-cyan-500/10 px-3 text-xs font-black text-cyan-200 hover:bg-cyan-500 hover:text-black">Create a room</button>
+                              </div>
+                          </div>
+                          {activeRooms.filter(isRoomPublic).length === 0 ? (
+                              <div className="rounded-3xl border border-white/10 bg-[#121322] px-6 py-16 text-center shadow-2xl">
+                                  <i className="fa-solid fa-satellite-dish text-4xl text-cyan-400/50"></i>
+                                  <p className="mt-4 text-sm font-black text-gray-200">No public rooms are live yet.</p>
+                                  <p className="mt-1 text-xs text-gray-500">Start a public room or ask a host for their private code.</p>
+                              </div>
+                          ) : (
+                              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                                  {activeRooms.filter(isRoomPublic).map(room => (
+                                      <div key={room.roomId} className="group flex flex-col justify-between rounded-2xl border border-white/10 bg-[#121322] p-4 shadow-xl transition-all hover:-translate-y-0.5 hover:border-cyan-500/50">
+                                          <div>
+                                              <div className="flex items-center justify-between gap-2">
+                                                  <span className="rounded-full bg-emerald-500/15 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-emerald-300"><i className="fa-solid fa-globe mr-1"></i>Public</span>
+                                                  <span className="text-[10px] font-bold text-gray-400">{room.users?.length || 0} watching</span>
+                                              </div>
+                                              <h3 className="mt-3 truncate text-sm font-black text-white group-hover:text-cyan-300">{room.roomName}</h3>
+                                              <p className="mt-1 text-[11px] text-gray-400">Hosted by <span className="font-bold text-gray-200">{room.creator}</span></p>
+                                              {room.movie && <div className="mt-3 flex items-center gap-2.5 rounded-xl border border-white/5 bg-black/30 p-2">
+                                                  <img src={getPosterSrc(room.movie, 80)} alt="" width={40} height={56} loading="lazy" className="h-14 w-10 rounded-lg object-cover" onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = WATCH_PARTY_FALLBACK; }} />
+                                                  <div className="min-w-0"><p className="truncate text-xs font-bold text-gray-200">{room.movie.title || 'Choosing a title'}</p><p className="mt-1 text-[10px] text-cyan-300">{room.paused ? 'Paused' : 'Playing now'}</p></div>
+                                              </div>}
+                                          </div>
+                                          <button type="button" onClick={() => room.entryMode === 'auto' ? handleJoinRoom(room.roomId) : handleRequestRoom(room.roomId)} disabled={joinRequestRoomId === room.roomId && (joinRequestState === 'pending' || joinRequestState === 'submitting')} className="mt-4 min-h-11 w-full rounded-xl bg-cyan-500 px-3 text-xs font-black text-black hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50">
+                                              <i className={`fa-solid ${room.entryMode === 'auto' ? 'fa-right-to-bracket' : 'fa-paper-plane'} mr-1.5`}></i>{room.entryMode === 'auto' ? 'Join now' : 'Request to join'}
+                                          </button>
+                                      </div>
+                                  ))}
+                              </div>
+                          )}
+                      </div>
+                      ) : (
                              <form onSubmit={handleJoinByCode} className="mx-auto max-w-xl rounded-3xl border border-white/10 bg-[#121322] p-6 text-center shadow-2xl">
                                  <i className="fa-solid fa-ticket text-3xl text-cyan-400"></i>
                                  <h2 className="mt-3 text-lg font-black">Join watch party by code</h2>
@@ -1027,8 +1229,8 @@ export const WatchPartyView: React.FC<{
                                         required 
                                     />
                                 </div>
-                                <div>
-                                    <label htmlFor="watch-party-entry-mode" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Guest Entry Mode</label>
+                                 <div>
+                                     <label htmlFor="watch-party-entry-mode" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Guest Entry Mode</label>
                                         <select
                                             id="watch-party-entry-mode"
                                             value={createEntryMode}
@@ -1037,8 +1239,21 @@ export const WatchPartyView: React.FC<{
                                     >
                                         <option value="manual">Manual Approval</option>
                                         <option value="auto">Auto-Enter</option>
-                                    </select>
-                                </div>
+                                     </select>
+                                 </div>
+                                 <div>
+                                     <label htmlFor="watch-party-visibility" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Room visibility</label>
+                                     <select
+                                         id="watch-party-visibility"
+                                         value={createVisibility}
+                                         onChange={(e) => setCreateVisibility(e.target.value as 'public' | 'private')}
+                                         className="w-full min-h-11 bg-[#0a0b14] border border-white/10 rounded-xl py-2 px-3 text-white text-xs outline-none focus:border-cyan-500"
+                                     >
+                                         <option value="public">Public — show in Discover</option>
+                                         <option value="private">Private — invite/code only</option>
+                                     </select>
+                                     <p className="mt-1 text-[10px] text-gray-500">Private rooms are never promoted in the public list.</p>
+                                 </div>
 
                                 {/* Main Search Engine Picker */}
                                 <div>
@@ -1131,10 +1346,13 @@ export const WatchPartyView: React.FC<{
                                     {activeRooms.map(room => (
                                         <div key={room.roomId} className="bg-white/[0.03] border border-white/10 rounded-2xl p-4 flex flex-col justify-between hover:border-cyan-500/50 transition-all group">
                                             <div>
-                                                <div className="flex items-center justify-between mb-2">
-                                                    <span className="bg-cyan-500/20 text-cyan-400 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">
-                                                        ROOM #{room.roomId}
-                                                    </span>
+                                                 <div className="flex items-center justify-between mb-2">
+                                                     <div className="flex flex-wrap items-center gap-1.5">
+                                                         <span className="bg-cyan-500/20 text-cyan-400 text-[10px] font-mono font-bold px-2 py-0.5 rounded-full">ROOM #{room.roomId}</span>
+                                                         <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${isRoomPublic(room) ? 'bg-emerald-500/15 text-emerald-300' : 'bg-gray-500/15 text-gray-300'}`}>
+                                                             <i className={`fa-solid ${isRoomPublic(room) ? 'fa-globe' : 'fa-lock'} mr-1`}></i>{isRoomPublic(room) ? 'Public' : 'Private'}
+                                                         </span>
+                                                     </div>
                                                     <span className="text-[11px] text-emerald-400 font-bold flex items-center gap-1.5">
                                                         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
                                                         {room.users.length} {room.users.length === 1 ? 'Viewer' : 'Viewers'}
@@ -1514,45 +1732,63 @@ export const WatchPartyView: React.FC<{
                             <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4" aria-labelledby="guess-poster-title">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div>
-                                        <h2 id="guess-poster-title" className="text-sm font-black text-purple-200">Guess the Poster</h2>
-                                        <p className="text-[10px] text-purple-300/80">A 5-round waiting-room game for up to 8 players.</p>
+                                        <div className="flex items-center gap-2"><span className="rounded-full bg-purple-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-purple-200">Poster quiz</span><span className="text-[10px] text-purple-300/70">5 rounds · 20 sec each</span></div>
+                                        <h2 id="guess-poster-title" className="mt-1 text-sm font-black text-purple-100">Guess the Poster</h2>
+                                        <p className="text-[10px] text-purple-300/80">Exact/full guesses earn <strong className="text-amber-200">5 pts</strong>. Accepted non-full or near guesses earn <strong className="text-cyan-200">3 pts</strong>.</p>
                                     </div>
                                     {isCreator && (!guessPosterGame || guessPosterGame.status === 'finished') && (
-                                        <button type="button" onClick={handleStartGuessPoster} disabled={currentRoom.users.length < 2 || getGuessPosterCandidates().length === 0} className="min-h-11 rounded-xl bg-purple-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">
-                                            Start game
-                                        </button>
+                                        <button type="button" onClick={handleStartGuessPoster} disabled={currentRoom.users.length < 2 || getGuessPosterCandidates().length === 0} className="min-h-11 rounded-xl bg-purple-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">Start game</button>
                                     )}
                                 </div>
                                 {guessPosterGame ? (
-                                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1.25fr)_minmax(0,.75fr)]">
                                         <div>
-                                            <div className="flex items-center justify-between text-[11px] font-black text-purple-100">
-                                                <span>Round {guessPosterGame.round}/{guessPosterGame.maxRounds}</span>
-                                                {guessPosterGame.status === 'active' && <span>{gameRemainingSeconds}s</span>}
+                                            <div className="flex items-center justify-between text-[11px] font-black text-purple-100"><span>Round {guessPosterGame.round}/{guessPosterGame.maxRounds}</span>{guessPosterGame.status === 'active' && <span className="rounded-full bg-black/30 px-2 py-1 text-amber-200">{gameRemainingSeconds}s</span>}</div>
+                                            <div className="relative mt-2 overflow-hidden rounded-2xl border border-purple-300/20 bg-black/50 p-2 shadow-2xl">
+                                                <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_0%,rgba(168,85,247,.28),transparent_55%)]"></div>
+                                                {guessPosterGame.posterUrl ? <img src={guessPosterGame.posterUrl} alt="Mystery poster, title hidden until reveal" className="relative h-56 w-full rounded-xl object-cover transition-[filter] duration-500 sm:h-64" style={{ filter: guessPosterGame.status === 'active' ? `blur(${Math.max(2, gameRemainingSeconds / 2)}px) saturate(.75)` : 'none' }} /> : <div className="relative flex h-56 items-center justify-center text-xs text-gray-500">Poster unavailable</div>}
+                                                {guessPosterGame.status === 'active' && <div className="absolute inset-x-5 bottom-5 rounded-xl border border-white/15 bg-black/60 px-3 py-2 text-center text-[10px] font-black uppercase tracking-[.2em] text-white/80 backdrop-blur">Title hidden · trust the clues</div>}
                                             </div>
-                                            <div className="mt-2 overflow-hidden rounded-xl border border-white/10 bg-black/40">
-                                                {guessPosterGame.posterUrl ? (
-                                                    <img src={guessPosterGame.posterUrl} alt="Blurred mystery poster" className={`h-40 w-full object-cover transition-[filter] duration-500 ${guessPosterGame.status === 'active' ? 'blur-md' : 'blur-0'}`} style={{ filter: guessPosterGame.status === 'active' ? `blur(${Math.max(2, gameRemainingSeconds / 2)}px)` : 'none' }} />
-                                                ) : <div className="flex h-40 items-center justify-center text-xs text-gray-500">Poster unavailable</div>}
-                                            </div>
-                                            {guessPosterGame.status === 'active' && (
-                                                <form onSubmit={handleGuessSubmit} className="mt-2 flex gap-2">
-                                                    <input value={guessInput} onChange={e => setGuessInput(e.target.value)} maxLength={80} placeholder="Type your guess" className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/40 px-3 text-xs text-white outline-none focus:border-purple-300" aria-label="Guess the poster title" />
-                                                    <button type="submit" className="min-h-11 rounded-xl bg-purple-400 px-3 text-xs font-black text-black">Guess</button>
-                                                </form>
-                                            )}
+                                            {(guessPosterGame.label || guessPosterGame.category || guessPosterGame.mediaType || guessPosterGame.contentType) && <div className="mt-2 flex flex-wrap gap-1.5">{[guessPosterGame.label, guessPosterGame.category, guessPosterGame.mediaType || guessPosterGame.contentType].filter(Boolean).map(label => <span key={label} className="rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-bold text-cyan-200">{label}</span>)}</div>}
+                                            {guessPosterGame.status === 'active' && <form onSubmit={handleGuessSubmit} className="mt-2 flex gap-2"><input value={guessInput} onChange={e => setGuessInput(e.target.value)} maxLength={80} placeholder="Type your guess — title stays hidden" className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/40 px-3 text-xs text-white outline-none focus:border-purple-300" aria-label="Guess the poster title" /><button type="submit" className="min-h-11 rounded-xl bg-purple-400 px-3 text-xs font-black text-black">Guess</button></form>}
                                             {gameNotice && <p className="mt-2 text-[11px] font-bold text-amber-200" role="status">{gameNotice}</p>}
-                                            {guessPosterGame.revealed && <p className="mt-2 text-xs font-black text-emerald-200">Answer: {guessPosterGame.answerTitle}</p>}
+                                            {guessPosterGame.revealed && <p className="mt-2 text-xs font-black text-emerald-200">Answer revealed: {guessPosterGame.answerTitle}</p>}
+                                            {guessPosterHistory.length > 1 && <div className="mt-3"><p className="mb-1.5 text-[9px] font-black uppercase tracking-wider text-purple-200/70">Round reel</p><div className="flex gap-2 overflow-x-auto pb-1">{guessPosterHistory.map(item => <div key={item.round} className={`relative h-14 w-10 shrink-0 overflow-hidden rounded-lg border ${item.round === guessPosterGame.round ? 'border-purple-300' : 'border-white/10'}`}><img src={item.posterUrl || WATCH_PARTY_FALLBACK} alt={`Round ${item.round}`} className={`h-full w-full object-cover ${item.revealed ? '' : 'blur-sm'}`} /><span className="absolute inset-x-0 bottom-0 bg-black/70 text-center text-[9px] font-black text-white">R{item.round}</span></div>)}</div></div>}
                                         </div>
-                                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-                                            <h3 className="text-[10px] font-black uppercase tracking-wider text-purple-200">Scoreboard</h3>
-                                            <ol className="mt-2 space-y-1.5">
-                                                {gameLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between text-xs text-gray-200"><span>{index + 1}. {name}</span><strong className="text-purple-200">{score}</strong></li>)}
-                                            </ol>
-                                            {guessPosterGame.status === 'finished' && <p className="mt-3 text-[11px] font-black text-emerald-200">Final leaderboard</p>}
-                                        </div>
+                                        <div className="rounded-xl border border-white/10 bg-black/20 p-3"><h3 className="text-[10px] font-black uppercase tracking-wider text-purple-200">Scoreboard</h3><ol className="mt-2 space-y-1.5">{gameLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between text-xs text-gray-200"><span>{index + 1}. {name}</span><strong className="text-purple-200">{score}</strong></li>)}</ol>{gameLeaderboard.length === 0 && <p className="mt-2 text-[11px] text-gray-500">Scores appear after the first correct guess.</p>}{guessPosterGame.status === 'finished' && <p className="mt-3 text-[11px] font-black text-emerald-200">Final leaderboard</p>}</div>
                                     </div>
                                 ) : <p className="mt-3 text-[11px] text-gray-400">Waiting for the host to start a game. At least two members are required.</p>}
+                            </section>
+                            {/* SECOND WAITING-ROOM GAME: MOVIE TRIVIA */}
+                            <section className="rounded-2xl border border-cyan-500/25 bg-cyan-950/15 p-4" aria-labelledby="movie-trivia-title">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                        <div className="flex items-center gap-2"><span className="rounded-full bg-cyan-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-200">New game</span><span className="text-[10px] text-cyan-300/70">Timed choices</span></div>
+                                        <h2 id="movie-trivia-title" className="mt-1 text-sm font-black text-cyan-100">Movie Trivia</h2>
+                                        <p className="text-[10px] text-cyan-300/80">Race the room to the right answer, then watch the scoreboard update.</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        {isCreator && triviaGame && <button type="button" onClick={handleEndTrivia} className="min-h-10 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-[11px] font-black text-red-200 hover:bg-red-500 hover:text-white">End game</button>}
+                                        {isCreator && (!triviaGame || triviaGame.status === 'finished') && <button type="button" onClick={handleStartTrivia} disabled={isStartingTrivia || currentRoom.users.length < 2} className="min-h-10 rounded-xl bg-cyan-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">{isStartingTrivia ? 'Loading…' : 'Start trivia'}</button>}
+                                    </div>
+                                </div>
+                                {triviaError && <div role="alert" className="mt-3 rounded-xl border border-red-400/30 bg-red-500/10 px-3 py-2 text-[11px] font-bold text-red-200"><i className="fa-solid fa-triangle-exclamation mr-1.5"></i>{triviaError}</div>}
+                                {isStartingTrivia && !triviaGame && <div className="mt-3 flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-4 text-xs text-gray-300" role="status"><span className="h-4 w-4 animate-spin rounded-full border-2 border-cyan-300 border-t-transparent"></span>Preparing a trivia round…</div>}
+                                {triviaGame ? <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,.75fr)]">
+                                    <div className="rounded-2xl border border-white/10 bg-black/25 p-3">
+                                        <div className="flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-cyan-200"><span>Round {triviaGame.round}/{triviaGame.maxRounds}</span>{triviaGame.status === 'active' && <span className="rounded-full bg-cyan-400/10 px-2 py-1 text-cyan-200">{triviaRemainingSeconds}s</span>}</div>
+                                        <p className="mt-3 text-base font-black leading-snug text-white">{triviaGame.prompt || 'Trivia prompt loading…'}</p>
+                                        {triviaGame.category && <span className="mt-2 inline-flex rounded-full border border-cyan-400/20 bg-cyan-400/10 px-2 py-1 text-[10px] font-bold text-cyan-200">{triviaGame.category}</span>}
+                                        <div className="mt-4 grid gap-2">{(triviaGame.choices || []).map((choice, index) => {
+                                            const isSelected = triviaChoice === index;
+                                            const isAnswer = triviaGame.revealed && triviaGame.answerIndex === index;
+                                            return <button key={`${choice}-${index}`} type="button" onClick={() => handleTriviaSubmit(index)} disabled={triviaGame.status !== 'active' || triviaChoice !== null} className={`min-h-12 rounded-xl border px-3 text-left text-xs font-bold transition-all ${isAnswer ? 'border-emerald-300 bg-emerald-500/20 text-emerald-100' : isSelected ? 'border-cyan-300 bg-cyan-500/20 text-cyan-100' : 'border-white/10 bg-white/5 text-gray-200 hover:border-cyan-300/60 hover:bg-cyan-500/10'} disabled:cursor-not-allowed disabled:opacity-80`}><span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-lg bg-black/25 text-[10px]">{String.fromCharCode(65 + index)}</span>{choice}</button>;
+                                        })}</div>
+                                        {triviaGame.revealed && triviaGame.correctChoice && <p className="mt-3 text-xs font-black text-emerald-200">Correct answer: {triviaGame.correctChoice}</p>}
+                                        {triviaNotice && <p className="mt-2 text-[11px] font-bold text-amber-200" role="status">{triviaNotice}</p>}
+                                    </div>
+                                    <div className="rounded-xl border border-white/10 bg-black/20 p-3"><h3 className="text-[10px] font-black uppercase tracking-wider text-cyan-200">Scoreboard</h3><ol className="mt-2 space-y-1.5">{triviaLeaderboard.map(([name, score], index) => <li key={name} className="flex items-center justify-between text-xs text-gray-200"><span>{index + 1}. {name}</span><strong className="text-cyan-200">{score}</strong></li>)}</ol>{triviaLeaderboard.length === 0 && <p className="mt-2 text-[11px] text-gray-500">Scores appear after the first answer.</p>}{triviaGame.status === 'finished' && <p className="mt-3 text-[11px] font-black text-emerald-200">Final leaderboard</p>}</div>
+                                </div> : !isStartingTrivia && !triviaError && <div className="mt-3 rounded-xl border border-dashed border-white/10 bg-black/15 px-3 py-5 text-center text-[11px] text-gray-400"><i className="fa-solid fa-circle-question mb-2 text-2xl text-cyan-400/50"></i><p>No trivia round is active.</p><p className="mt-1 text-gray-500">The host can start Movie Trivia when at least two people are in the room.</p></div>}
                             </section>
                         </div>
 

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
 import { classifyNetworkQuality, calculateRetryDelay } from './utils/networkQuality.js';
-import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, createMovieTriviaGame, getPublicGuessPosterGame, getPublicMovieTriviaGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess, scoreGuess, scoreTriviaAnswer } from './server/watchPartyGame.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 test('manifest and lockfile root dependencies agree', () => {
@@ -186,6 +186,40 @@ test('guess poster server flow protects answer data and cleans game state', () =
   assert.match(server, /guess_poster_round_revealed/);
   assert.match(server, /clearGuessPosterGame\(room\)/);
   assert.match(server, /guess_poster_finished/);
+});
+
+test('watch-party public discovery, privacy, games, and scoring rules are covered', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(server, /function cleanRoomPrivacy/);
+  assert.match(server, /\.filter\(r => r\.privacy !== 'private'\)/);
+  assert.match(server, /io\.emit\('public_rooms_list'/);
+  assert.match(server, /roomNameIsReserved/);
+  assert.match(server, /socket\.on\('movie_trivia_start'/);
+  assert.match(server, /socket\.on\('movie_trivia_submit'/);
+  assert.match(client, /createVisibility/);
+  assert.match(client, /entryTab === 'discover'/);
+  assert.match(client, /posterCandidatePool/);
+  assert.match(client, /Movie Trivia/);
+});
+
+test('guess poster awards five for full title and three for accepted non-full answers', () => {
+  const candidate = { title: 'The Princess Bride', aliases: ['Princess Bride'] };
+  assert.equal(scoreGuess('The Princess Bride', candidate), 5);
+  assert.equal(scoreGuess('Princess Bride', candidate), 3);
+  assert.equal(scoreGuess('Princess', candidate), 3);
+  assert.equal(scoreGuess('Completely Wrong', candidate), 0);
+});
+
+test('movie trivia keeps the answer private until reveal and prevents duplicate scoring', () => {
+  const game = createMovieTriviaGame([{ question: 'Which is a movie?', options: ['Film', 'Book'], answerIndex: 0 }], 1_000, 20_000);
+  game.scores = { Viewer: 0 };
+  const hidden = getPublicMovieTriviaGame(game);
+  assert.equal(hidden.answerIndex, undefined);
+  assert.equal(scoreTriviaAnswer(game, 'Viewer', 0).points, 1);
+  assert.equal(scoreTriviaAnswer(game, 'Viewer', 0).duplicate, true);
+  game.status = 'reveal';
+  assert.equal(getPublicMovieTriviaGame(game).answerIndex, 0);
 });
 
 test('audited proxy routes use provider host allowlists and private-address checks', { skip: 'proxy lockdown pending (branch wip/proxy-and-hud)' }, () => {

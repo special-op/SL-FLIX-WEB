@@ -17,7 +17,7 @@ import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
 import { getNormalizedChannels } from './server/iptvStorage.js';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
-import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, classifyGuess, nextGuessPosterRound, createMovieTriviaGame, getPublicMovieTriviaGame, scoreTriviaAnswer } from './server/watchPartyGame.js';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -127,17 +127,43 @@ const GUESS_POSTER_MAX_PLAYERS = 8;
 const GUESS_POSTER_ROUND_MS = 20 * 1000;
 const GUESS_POSTER_REVEAL_MS = 3 * 1000;
 const GUESS_POSTER_MAX_GUESS_LENGTH = 80;
+const MOVIE_TRIVIA_MAX_QUESTIONS = 20;
+const MOVIE_TRIVIA_MAX_PLAYERS = 12;
+const MOVIE_TRIVIA_ROUND_MS = 20 * 1000;
+const MOVIE_TRIVIA_REVEAL_MS = 3 * 1000;
 
 function clearGuessPosterGame(room) {
     if (room?.guessPosterGame?.timer) clearTimeout(room.guessPosterGame.timer);
     cleanupGuessPosterGame(room);
 }
 
+function clearMovieTriviaGame(room) {
+    if (room?.movieTriviaGame?.timer) clearTimeout(room.movieTriviaGame.timer);
+    if (room && Object.prototype.hasOwnProperty.call(room, 'movieTriviaGame')) delete room.movieTriviaGame;
+}
+
+function recordGuessAttempt(game, attempt) {
+    game.attempts = Array.isArray(game.attempts) ? game.attempts : [];
+    game.attempts.push(attempt);
+    if (game.attempts.length > 250) game.attempts.shift();
+}
+
 function publicRoomWithGame(room) {
-    const { guessPosterGame, reconnectGrace, ...publicRoom } = room;
-    return guessPosterGame
-        ? { ...publicRoom, guessPosterGame: getPublicGuessPosterGame(guessPosterGame) }
-        : publicRoom;
+    const { guessPosterGame, movieTriviaGame, reconnectGrace, hostToken, pendingRequests, ...publicRoom } = room;
+    const safeRoom = {
+        ...publicRoom,
+        privacy: room.privacy === 'private' ? 'private' : 'public',
+        isPrivate: room.privacy === 'private',
+        isPublic: room.privacy !== 'private',
+        visibility: room.privacy === 'private' ? 'private' : 'public'
+    };
+    if (guessPosterGame) safeRoom.guessPosterGame = getPublicGuessPosterGame(guessPosterGame);
+    if (movieTriviaGame) {
+        const publicTrivia = getPublicMovieTriviaGame(movieTriviaGame);
+        safeRoom.movieTriviaGame = publicTrivia;
+        safeRoom.triviaGame = publicTrivia;
+    }
+    return safeRoom;
 }
 
 function getRoomCurrentTime(room) {
@@ -152,15 +178,19 @@ function getActiveRoomsList() {
     return Array.from(watchRooms.values())
         // Keep empty rooms visible during the host reconnect grace period so a host
         // can still find their own room after a refresh or transient disconnect.
+        .filter(r => r.privacy !== 'private')
         .filter(r => (r.users && r.users.length > 0) || (now - (r.updatedAt || now) < ROOM_EMPTY_GRACE_MS))
         .map(r => {
-            const { pendingRequests, hostToken, ...roomWithoutPrivateFields } = r;
-            return { ...publicRoomWithGame(roomWithoutPrivateFields), currentTime: getRoomCurrentTime(r) };
+            return { ...publicRoomWithGame(r), currentTime: getRoomCurrentTime(r) };
         });
 }
 
 function broadcastActiveRooms() {
-    io.emit('active_rooms_list', getActiveRoomsList());
+    const rooms = getActiveRoomsList();
+    io.emit('active_rooms_list', rooms);
+    // Additive discovery event for clients that distinguish browse from legacy
+    // active-room updates. Both payloads intentionally contain public metadata only.
+    io.emit('public_rooms_list', rooms);
 }
 
 // Clean up stale or empty rooms every 30 seconds to prevent room spam
@@ -174,6 +204,7 @@ setInterval(() => {
             io.to(roomId).emit('room_ended', { roomId, message: 'Nobody joined "' + room.roomName + '" within 30 minutes, so the room was closed.', endedBy: 'System' });
             io.in(roomId).socketsLeave(roomId);
             clearGuessPosterGame(room);
+            clearMovieTriviaGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
             continue;
@@ -182,6 +213,7 @@ setInterval(() => {
         // Delete empty rooms older than 3 minutes, or any room older than 12 hours
         if ((isEmpty && now - (room.updatedAt || now) > ROOM_EMPTY_GRACE_MS) || (now - (room.updatedAt || now) > 12 * 60 * 60 * 1000)) {
             clearGuessPosterGame(room);
+            clearMovieTriviaGame(room);
             watchRooms.delete(roomId);
             hasChanges = true;
         }
@@ -199,6 +231,7 @@ const ROOM_NAME_MAX_LENGTH = 120;
 const MESSAGE_MAX_LENGTH = 1000;
 const MAX_PENDING_ROOM_REQUESTS = 50;
 const ROOM_ENTRY_MODES = new Set(['manual', 'auto']);
+const ROOM_PRIVACY_MODES = new Set(['public', 'private']);
 const CLIENT_REQUEST_ID_MAX_LENGTH = 120;
 
 function cleanText(value, maxLength, fallback = '') {
@@ -215,12 +248,44 @@ function cleanRoomEntryMode(value) {
     return ROOM_ENTRY_MODES.has(value) ? value : 'manual';
 }
 
+function cleanRoomPrivacy(payload) {
+    const requested = payload?.privacy
+        ?? payload?.roomPrivacy
+        ?? payload?.visibility
+        ?? (payload?.isPrivate === true || payload?.isPublic === false || payload?.public === false ? 'private' : 'public');
+    return ROOM_PRIVACY_MODES.has(requested) ? requested : 'public';
+}
+
+function normalizeDisplayName(value) {
+    return cleanText(value, USERNAME_MAX_LENGTH).toLocaleLowerCase();
+}
+
 function validRoomPayload(payload) {
     return payload !== null && typeof payload === 'object' && !Array.isArray(payload);
 }
 
 function isRoomMember(room, socket) {
     return room?.users?.find(user => user.id === socket.data.identity?.id) || null;
+}
+
+function roomNameIsReserved(room, username, options = {}) {
+    const normalized = normalizeDisplayName(username);
+    if (!normalized) return false;
+    const ignoredSocketId = options.socketId || '';
+    const active = (room?.users || []).some(user => (
+        normalizeDisplayName(user.name) === normalized && user.id !== ignoredSocketId
+    ));
+    const pending = (room?.pendingRequests || []).some(request => (
+        normalizeDisplayName(request.username) === normalized && request.socketId !== ignoredSocketId
+    ));
+    const reconnecting = (room?.reconnectGrace || []).some(entry => (
+        normalizeDisplayName(entry.username) === normalized && entry.socketId !== ignoredSocketId
+    ));
+    return active || pending || reconnecting;
+}
+
+function roomHasHostName(room, username) {
+    return normalizeDisplayName(room?.creator) === normalizeDisplayName(username);
 }
 
 function getRoomStateForSocket(room, socket) {
@@ -258,9 +323,53 @@ function cleanGuessPosterCandidates(value) {
         const id = cleanText(candidate.id, 100);
         const title = cleanText(candidate.title, 160);
         const posterUrl = cleanText(candidate.posterUrl, 1000);
-        return id && title ? { id, title, posterUrl } : null;
+        const canonicalTitle = cleanText(candidate.canonicalTitle, 160);
+        const aliases = Array.isArray(candidate.aliases)
+            ? candidate.aliases.map(alias => cleanText(alias, 160)).filter(Boolean).slice(0, 10)
+            : [];
+        const contentType = cleanText(candidate.contentType || candidate.type, 32);
+        const category = cleanText(candidate.category, 64);
+        return id && title ? {
+            id,
+            title,
+            posterUrl,
+            ...(canonicalTitle ? { canonicalTitle } : {}),
+            ...(aliases.length ? { aliases } : {}),
+            ...(contentType ? { contentType } : {}),
+            ...(category ? { category } : {})
+        } : null;
     });
     return candidates.every(Boolean) ? candidates : null;
+}
+
+function buildMovieTriviaQuestions(payload) {
+    if (Array.isArray(payload?.questions) && payload.questions.length) {
+        return payload.questions.slice(0, MOVIE_TRIVIA_MAX_QUESTIONS);
+    }
+    // Older clients send the poster candidate set instead of question objects.
+    // Turn that set into safe title-choice rounds without trusting client answers.
+    const candidates = cleanGuessPosterCandidates(payload?.candidates) || [];
+    if (!candidates.length) return [];
+    const requestedRounds = Number.isInteger(Number(payload?.maxRounds))
+        ? Math.min(5, Math.max(1, Number(payload.maxRounds)))
+        : Math.min(5, candidates.length);
+    return Array.from({ length: requestedRounds }, (_, index) => {
+        const answer = candidates[index % candidates.length];
+        const distractors = candidates
+            .filter(candidate => candidate.id !== answer.id)
+            .slice(0, 3)
+            .map(candidate => candidate.title);
+        const baseOptions = [answer.title, ...distractors];
+        const shift = baseOptions.length ? index % baseOptions.length : 0;
+        const options = [...baseOptions.slice(shift), ...baseOptions.slice(0, shift)];
+        return {
+            id: `movie-trivia-${index + 1}`,
+            question: `Which title belongs to this watch-party challenge?`,
+            options,
+            answerIndex: options.indexOf(answer.title),
+            category: answer.category || answer.contentType || ''
+        };
+    });
 }
 
 function scheduleGuessPosterRound(roomId) {
@@ -275,13 +384,9 @@ function startNextGuessPosterRound(roomId) {
     const room = watchRooms.get(roomId);
     const previous = room?.guessPosterGame;
     if (!room || !previous || previous.round >= previous.maxRounds) return;
-    const next = createGuessPosterGame(previous.candidates, Date.now(), GUESS_POSTER_ROUND_MS);
-    room.guessPosterGame = {
-        ...next,
-        round: previous.round + 1,
-        maxRounds: previous.maxRounds,
-        scores: { ...previous.scores }
-    };
+    const next = nextGuessPosterRound(previous, Date.now(), GUESS_POSTER_ROUND_MS);
+    if (!next) return;
+    room.guessPosterGame = { ...next, scores: { ...previous.scores } };
     io.to(roomId).emit('guess_poster_started', { game: getPublicGuessPosterGame(room.guessPosterGame) });
     scheduleGuessPosterRound(roomId);
 }
@@ -302,6 +407,49 @@ function revealGuessPosterRound(roomId) {
     game.timer = setTimeout(() => startNextGuessPosterRound(roomId), GUESS_POSTER_REVEAL_MS);
 }
 
+function scheduleMovieTriviaRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.movieTriviaGame;
+    if (!room || !game || game.status !== 'active') return;
+    if (game.timer) clearTimeout(game.timer);
+    game.timer = setTimeout(() => revealMovieTriviaRound(roomId), Math.max(0, game.endsAt - Date.now()));
+}
+
+function startNextMovieTriviaRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.movieTriviaGame;
+    if (!room || !game || game.round >= game.maxRounds) return;
+    game.round += 1;
+    game.currentQuestion += 1;
+    game.startedAt = Date.now();
+    game.endsAt = game.startedAt + game.roundMs;
+    game.status = 'active';
+    game.answeredPlayers = [];
+    game.answered = {};
+    game.attempts = [];
+    game.failedAnswers = [];
+    const event = { game: getPublicMovieTriviaGame(game) };
+    io.to(roomId).emit('movie_trivia_round_started', event);
+    scheduleMovieTriviaRound(roomId);
+}
+
+function revealMovieTriviaRound(roomId) {
+    const room = watchRooms.get(roomId);
+    const game = room?.movieTriviaGame;
+    if (!room || !game || game.status !== 'active') return;
+    game.status = 'reveal';
+    game.timer = null;
+    const event = { game: getPublicMovieTriviaGame(game) };
+    io.to(roomId).emit('movie_trivia_round_revealed', event);
+    if (game.round >= game.maxRounds) {
+        game.status = 'finished';
+        const finished = { game: getPublicMovieTriviaGame(game) };
+        io.to(roomId).emit('movie_trivia_finished', finished);
+        return;
+    }
+    game.timer = setTimeout(() => startNextMovieTriviaRound(roomId), MOVIE_TRIVIA_REVEAL_MS);
+}
+
 io.on('connection', (socket) => {
     socket.data.identity = Object.freeze({ id: socket.id });
     socket.data.eventTimestamps = [];
@@ -319,7 +467,9 @@ io.on('connection', (socket) => {
     });
 
     socket.on('get_active_rooms', () => {
-        socket.emit('active_rooms_list', getActiveRoomsList());
+        const rooms = getActiveRoomsList();
+        socket.emit('active_rooms_list', rooms);
+        socket.emit('public_rooms_list', rooms);
     });
 
     socket.on('network_quality_ping', (sentAt, acknowledge) => {
@@ -356,6 +506,7 @@ io.on('connection', (socket) => {
             roomName: cleanText(roomName, ROOM_NAME_MAX_LENGTH, `Room ${cleanRoomId}`),
             creator: cleanUsername,
             entryMode: cleanRoomEntryMode(payload.entryMode),
+            privacy: cleanRoomPrivacy(payload),
             hostToken: randomUUID(),
             movie: movie && typeof movie === 'object' ? movie : null,
             currentSeason: Number.isInteger(Number(season)) && Number(season) >= 1 ? Number(season) : 1,
@@ -367,6 +518,7 @@ io.on('connection', (socket) => {
             currentTime: 0,
             paused: false, // Starts playing continuous real-time movie stream
             guessPosterGame: null,
+            movieTriviaGame: null,
             reconnectGrace: [],
             waitExpiresAt: now + ROOM_WAIT_MS,
             updatedAt: now
@@ -398,22 +550,38 @@ io.on('connection', (socket) => {
 
             const isHostReconnect = typeof payload.hostToken === 'string' && payload.hostToken === room.hostToken;
             const isCreatorUser = isHostReconnect;
-            const nameOwner = room.users.find(user => user.name.toLowerCase() === cleanUsername.toLowerCase());
-            const pendingNameOwner = (room.pendingRequests || []).find(request => request.username.toLowerCase() === cleanUsername.toLowerCase());
+            const normalizedUsername = normalizeDisplayName(cleanUsername);
+            const nameOwner = room.users.find(user => normalizeDisplayName(user.name) === normalizedUsername);
+            const pendingNameOwner = (room.pendingRequests || []).find(request => normalizeDisplayName(request.username) === normalizedUsername);
+            const reconnectReservation = (room.reconnectGrace || []).find(entry => normalizeDisplayName(entry.username) === normalizedUsername);
             const isRoomHostName = room.creator.toLowerCase() === cleanUsername.toLowerCase();
-            if ((nameOwner && nameOwner.id !== socket.id && (!isHostReconnect || !nameOwner.isCreator)) || (pendingNameOwner && pendingNameOwner.socketId !== socket.id) || (isRoomHostName && !isHostReconnect)) {
+            const activeNameConflict = Boolean(nameOwner && nameOwner.id !== socket.id && !(isHostReconnect && nameOwner.isCreator));
+            const pendingNameConflict = Boolean(pendingNameOwner && pendingNameOwner.socketId !== socket.id);
+            const reconnectNameConflict = Boolean(reconnectReservation && !payload.reconnect && !(isHostReconnect && reconnectReservation.isCreator));
+            const ownsReconnectReservation = Boolean(isHostReconnect || (payload.reconnect && reconnectReservation && !reconnectReservation.isCreator));
+            const reservedByAnotherSocket = roomNameIsReserved(room, cleanUsername, { socketId: socket.id })
+                && !ownsReconnectReservation
+                && !(isHostReconnect && (nameOwner?.isCreator || reconnectReservation?.isCreator));
+            if (activeNameConflict || pendingNameConflict || reconnectNameConflict || reservedByAnotherSocket || (isRoomHostName && !isHostReconnect && !reconnectReservation)) {
                 socket.emit('error_message', { message: 'That display name is already in use in this room. Pick another name.' });
                 return;
             }
             if (isHostReconnect) {
                 const creator = room.users.find(user => user.isCreator);
                 if (creator) {
+                    const previousName = creator.name;
                     creator.id = socket.id;
                     creator.name = cleanUsername;
+                    for (const game of [room.guessPosterGame, room.movieTriviaGame]) {
+                        if (game?.scores && Object.prototype.hasOwnProperty.call(game.scores, previousName)) {
+                            game.scores[cleanUsername] = game.scores[previousName];
+                            if (previousName !== cleanUsername) delete game.scores[previousName];
+                        }
+                    }
                 }
                 room.creator = cleanUsername;
             }
-            const isGraceReconnect = Boolean(payload.reconnect) && (room.reconnectGrace || []).some(entry => entry.username.toLowerCase() === cleanUsername.toLowerCase());
+            const isGraceReconnect = Boolean(payload.reconnect && reconnectReservation && (!reconnectReservation.isCreator || isHostReconnect));
             const requiresApproval = room.entryMode === 'manual' && !isCreatorUser && !isGraceReconnect;
             if (requiresApproval) {
                 if (isRoomMember(room, socket)) {
@@ -529,11 +697,13 @@ io.on('connection', (socket) => {
             room.pendingRequests = [];
             for (const request of pendingRequests) {
                 const targetSocket = io.sockets.sockets.get(request.socketId);
-                if (!targetSocket || room.users.some(user => user.id === targetSocket.id || user.name.toLowerCase() === request.username.toLowerCase())) {
+                if (!targetSocket || roomNameIsReserved(room, request.username, { socketId: targetSocket.id })) {
+                    targetSocket?.emit('room_request_denied', { roomId, message: 'That display name is no longer available in this room.' });
                     continue;
                 }
                 targetSocket.join(roomId);
                 room.users.push({ id: targetSocket.id, name: request.username, isCreator: false, buffering: false });
+                room.reconnectGrace = (room.reconnectGrace || []).filter(entry => normalizeDisplayName(entry.username) !== normalizeDisplayName(request.username));
                 room.waitExpiresAt = null;
                 targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
                 io.to(roomId).emit('room_user_joined', { username: request.username, usersCount: room.users.length, users: room.users });
@@ -561,8 +731,13 @@ io.on('connection', (socket) => {
             return;
         }
         if (!targetSocket) return;
+        if (roomNameIsReserved(room, request.username, { socketId: targetSocket.id })) {
+            targetSocket.emit('room_request_denied', { roomId, message: 'That display name is no longer available in this room.' });
+            return;
+        }
         targetSocket.join(roomId);
         room.users.push({ id: targetSocket.id, name: request.username, isCreator: false, buffering: false });
+        room.reconnectGrace = (room.reconnectGrace || []).filter(entry => normalizeDisplayName(entry.username) !== normalizeDisplayName(request.username));
         room.waitExpiresAt = null;
         room.updatedAt = Date.now();
          targetSocket.emit('room_state', { ...getRoomStateForSocket(room, targetSocket), currentTime: getRoomCurrentTime(room), messages: room.messages || [] });
@@ -657,6 +832,7 @@ io.on('connection', (socket) => {
                 });
                 io.in(cleanRoomId).socketsLeave(cleanRoomId);
                 clearGuessPosterGame(room);
+                clearMovieTriviaGame(room);
                 watchRooms.delete(cleanRoomId);
                 broadcastActiveRooms();
             } else {
@@ -778,23 +954,64 @@ io.on('connection', (socket) => {
         const member = isRoomMember(room, socket);
         const game = room?.guessPosterGame;
         const guess = cleanText(payload.guess, GUESS_POSTER_MAX_GUESS_LENGTH);
-        if (!room || !member || !game || game.status !== 'active' || !guess) return;
+        if (!room || !member || !game || game.status !== 'active') return;
         if (!Object.prototype.hasOwnProperty.call(game.scores, member.name)) return;
+        const attemptId = `${socket.id}:${Date.now()}:${game.roundGuessCount || 0}`;
+        if (!guess) {
+            recordGuessAttempt(game, { attemptId, username: member.name, guess: '', points: 0, reason: 'invalid_guess', at: Date.now() });
+            const failure = {
+                attemptId,
+                guess: '',
+                points: 0,
+                reason: 'invalid_guess',
+                message: 'Your guess was empty. Enter a title or its initials.'
+            };
+            socket.emit('guess_poster_failed', failure);
+            return socket.emit('error_message', { message: failure.message });
+        }
         const now = Date.now();
         const rate = allowGuessRate((game.guessTimestamps || []).filter(entry => entry.socketId === socket.id).map(entry => entry.at), now);
         game.guessTimestamps = (game.guessTimestamps || []).filter(entry => entry.socketId !== socket.id || now - entry.at < 1000);
         if (!rate.allowed) return socket.emit('error_message', { message: 'Too many guesses. Slow down.' });
         game.guessTimestamps.push({ socketId: socket.id, at: now });
-        if (game.correctGuesses.some(entry => entry.username === member.name)) return;
-        if (!isCorrectGuess(guess, game.answerTitle)) return;
-
-        const points = scoreForCorrectGuess(game.correctGuesses.length);
-        if (points <= 0) return;
-        game.correctGuesses.push({ username: member.name, points });
-        game.scores[member.name] += points;
+        if (game.correctGuesses.some(entry => normalizeDisplayName(entry.username) === normalizeDisplayName(member.name))) {
+            recordGuessAttempt(game, { attemptId, username: member.name, guess, points: 0, reason: 'already_scored', at: now });
+            const failure = {
+                attemptId,
+                guess,
+                points: 0,
+                reason: 'already_scored',
+                message: 'You already scored this round.'
+            };
+            socket.emit('guess_poster_failed', failure);
+            return socket.emit('error_message', { message: failure.message });
+        }
+        game.roundGuessCount = Number(game.roundGuessCount || 0) + 1;
+        const result = classifyGuess(guess, {
+            title: game.answerTitle,
+            canonicalTitle: game.answerCanonicalTitle,
+            aliases: game.answerAliases
+        });
+        recordGuessAttempt(game, { attemptId, username: member.name, guess, points: result.points, reason: result.reason, at: now });
+        if (result.points <= 0) {
+            io.to(roomId).emit('guess_poster_attempt', { username: member.name, points: 0, reason: result.reason });
+            const failure = {
+                attemptId,
+                guess,
+                points: 0,
+                reason: result.reason,
+                message: 'That answer was not accepted. Try the full title, a near match, or initials.'
+            };
+            socket.emit('guess_poster_failed', failure);
+            return socket.emit('error_message', { message: failure.message });
+        }
+        game.correctGuesses.push({ username: member.name, points: result.points, reason: result.reason });
+        game.scores[member.name] = Number(game.scores[member.name] || 0) + result.points;
         io.to(roomId).emit('guess_poster_correct', {
             username: member.name,
-            points,
+            points: result.points,
+            reason: result.reason,
+            attemptId,
             scores: { ...game.scores }
         });
     });
@@ -806,6 +1023,84 @@ io.on('connection', (socket) => {
         if (!room || !isRoomMember(room, socket)?.isCreator) return;
         clearGuessPosterGame(room);
         io.to(roomId).emit('guess_poster_ended', { roomId });
+    });
+
+    socket.on('movie_trivia_start', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        if (!room || !member?.isCreator) return socket.emit('error_message', { message: 'Only the host can start a game.' });
+        if (room.users.length < 2) return socket.emit('error_message', { message: 'Movie Trivia needs at least two room members.' });
+        if (room.movieTriviaGame?.status === 'active' || room.movieTriviaGame?.status === 'reveal') {
+            return socket.emit('error_message', { message: 'A Movie Trivia game is already running.' });
+        }
+        const questions = buildMovieTriviaQuestions(payload);
+        const game = createMovieTriviaGame(questions, Date.now(), MOVIE_TRIVIA_ROUND_MS);
+        if (!game.questions.length) return socket.emit('error_message', { message: 'Send at least one valid trivia question.' });
+        game.scores = Object.fromEntries(room.users.slice(0, MOVIE_TRIVIA_MAX_PLAYERS).map(user => [user.name, 0]));
+        room.movieTriviaGame = game;
+        const event = { game: getPublicMovieTriviaGame(game) };
+        io.to(roomId).emit('movie_trivia_started', event);
+        scheduleMovieTriviaRound(roomId);
+    });
+
+    socket.on('movie_trivia_submit', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        const member = isRoomMember(room, socket);
+        const game = room?.movieTriviaGame;
+        const answerIndex = Number(payload.answerIndex);
+        if (!room || !member || !game || game.status !== 'active') return;
+        if (!Object.prototype.hasOwnProperty.call(game.scores, member.name)) return;
+        if (!Number.isInteger(answerIndex)) {
+            const failure = { points: 0, accepted: false, reason: 'invalid_answer', message: 'That trivia answer was invalid.' };
+            socket.emit('movie_trivia_failed', failure);
+            return socket.emit('error_message', { message: failure.message });
+        }
+        const result = scoreTriviaAnswer(game, member.name, answerIndex);
+        if (!result.accepted) {
+            const failure = {
+                points: 0,
+                accepted: false,
+                reason: result.reason || 'already_answered',
+                message: result.reason === 'already_answered' ? 'You already answered this round.' : 'That trivia answer was not accepted.'
+            };
+            socket.emit('movie_trivia_failed', failure);
+            return socket.emit('error_message', { message: failure.message });
+        }
+        const scoreEvent = {
+            username: member.name,
+            points: result.points,
+            correct: result.correct,
+            reason: result.reason,
+            scores: { ...game.scores },
+            // Do not send answerIndex/correct-answer data while the round is live.
+            accepted: true
+        };
+        io.to(roomId).emit('movie_trivia_score', scoreEvent);
+        io.to(roomId).emit('movie_trivia_answered', scoreEvent);
+        if (!result.correct) {
+            const failure = {
+                attemptId: `${socket.id}:${Date.now()}`,
+                answerIndex,
+                points: 0,
+                reason: 'incorrect',
+                message: 'Incorrect answer. The correct answer will be shown when the round is revealed.'
+            };
+            socket.emit('movie_trivia_failed', failure);
+            socket.emit('error_message', { message: failure.message });
+        }
+    });
+
+    socket.on('movie_trivia_end', (payload) => {
+        if (!validRoomPayload(payload)) return;
+        const roomId = cleanRoomIdValue(payload.roomId);
+        const room = watchRooms.get(roomId);
+        if (!room || !isRoomMember(room, socket)?.isCreator) return;
+        clearMovieTriviaGame(room);
+        io.to(roomId).emit('movie_trivia_ended', { roomId });
     });
 
     socket.on('room_chat', (payload) => {
