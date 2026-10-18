@@ -199,6 +199,7 @@ const ROOM_NAME_MAX_LENGTH = 120;
 const MESSAGE_MAX_LENGTH = 1000;
 const MAX_PENDING_ROOM_REQUESTS = 50;
 const ROOM_ENTRY_MODES = new Set(['manual', 'auto']);
+const CLIENT_REQUEST_ID_MAX_LENGTH = 120;
 
 function cleanText(value, maxLength, fallback = '') {
     if (typeof value !== 'string') return fallback;
@@ -305,6 +306,7 @@ io.on('connection', (socket) => {
     socket.data.identity = Object.freeze({ id: socket.id });
     socket.data.eventTimestamps = [];
     socket.data.roomCreationTimestamps = [];
+    socket.data.roomCreationRequests = new Map();
     socket.use((packet, next) => {
         if (isSocketRateLimited(socket)) return next(new Error('Too many watch-party requests'));
         next();
@@ -327,6 +329,15 @@ io.on('connection', (socket) => {
     socket.on('create_room', (payload) => {
         if (!validRoomPayload(payload)) return socket.emit('error_message', { message: 'Invalid room request.' });
         const { roomId, roomName, username, movie, season, episode } = payload;
+        const clientRequestId = cleanText(payload.clientRequestId, CLIENT_REQUEST_ID_MAX_LENGTH);
+        if (clientRequestId) {
+            const previousRequest = socket.data.roomCreationRequests.get(clientRequestId);
+            const previousRoom = previousRequest ? watchRooms.get(previousRequest.roomId) : null;
+            if (previousRoom && previousRequest.socketId === socket.id) {
+                return socket.emit('room_state', getRoomStateForSocket(previousRoom, socket));
+            }
+            if (previousRequest) socket.data.roomCreationRequests.delete(clientRequestId);
+        }
         const cleanRoomId = cleanRoomIdValue(roomId);
         const cleanUsername = cleanText(username, USERNAME_MAX_LENGTH);
         if (!cleanRoomId || !cleanUsername || watchRooms.has(cleanRoomId)) {
@@ -361,6 +372,9 @@ io.on('connection', (socket) => {
             updatedAt: now
         };
         watchRooms.set(cleanRoomId, room);
+        if (clientRequestId) {
+            socket.data.roomCreationRequests.set(clientRequestId, { roomId: cleanRoomId, socketId: socket.id });
+        }
         broadcastActiveRooms();
         socket.emit('room_state', getRoomStateForSocket(room, socket));
     });
@@ -406,7 +420,23 @@ io.on('connection', (socket) => {
                     return socket.emit('room_state', getRoomStateForSocket(room, socket));
                 }
                 room.pendingRequests = Array.isArray(room.pendingRequests) ? room.pendingRequests : [];
-                const existingRequest = room.pendingRequests.find(request => request.socketId === socket.id);
+                // A retry from the same socket and display name is the same request,
+                // not a new item in the host's approval queue.
+                const existingRequest = room.pendingRequests.find(request => (
+                    request.socketId === socket.id
+                    || request.username.toLowerCase() === cleanUsername.toLowerCase()
+                ));
+                if (existingRequest) {
+                    return socket.emit('room_request_pending', {
+                        roomId: cleanRoomId,
+                        requestId: existingRequest.requestId,
+                        username: existingRequest.username,
+                        requestedAt: existingRequest.requestedAt,
+                        status: 'pending',
+                        existing: true,
+                        message: 'Your request is already waiting for the room host.'
+                    });
+                }
                 if (!existingRequest && room.pendingRequests.length < MAX_PENDING_ROOM_REQUESTS) {
                     const request = {
                         requestId: `${socket.id}:${Date.now()}`,
@@ -423,10 +453,20 @@ io.on('connection', (socket) => {
                         username: request.username,
                         requestedAt: request.requestedAt
                     });
+                    return socket.emit('room_request_pending', {
+                        roomId: cleanRoomId,
+                        requestId: request.requestId,
+                        username: request.username,
+                        requestedAt: request.requestedAt,
+                        status: 'pending',
+                        existing: false,
+                        message: 'Your request was sent to the room host.'
+                    });
                 }
                 return socket.emit('room_request_pending', {
                     roomId: cleanRoomId,
-                    message: 'Your request was sent to the room host.'
+                    message: 'The room is at its pending-request limit. Please try again later.',
+                    status: 'full'
                 });
             }
 

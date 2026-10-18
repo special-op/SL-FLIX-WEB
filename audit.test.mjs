@@ -92,6 +92,30 @@ test('watch-party host seat cannot be claimed by a duplicate display name', () =
   assert.doesNotMatch(server, /room\.users\[0\]\.isCreator = true; \/\/ hand over host/);
 });
 
+test('watch-party room creation and join requests are idempotent with scoped entry UI', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(server, /socket\.data\.roomCreationRequests = new Map\(\)/);
+  assert.match(server, /const clientRequestId = cleanText\(payload\.clientRequestId/);
+  assert.match(server, /const previousRoom = previousRequest \? watchRooms\.get\(previousRequest\.roomId\) : null/);
+  assert.match(server, /request\.socketId === socket\.id\n\s*\|\| request\.username\.toLowerCase\(\) === cleanUsername\.toLowerCase\(\)/);
+  assert.match(server, /existing: true/);
+  assert.match(server, /status: 'full'/);
+  assert.match(client, /createInFlightRef/);
+  assert.match(client, /Join by code/);
+  assert.match(client, /setTargetRoomId\(cleanId\)/);
+  assert.match(client, /'Submitted'/);
+  assert.match(client, /disabled=\{requestInFlight \|\| !socket\}/);
+});
+
+test('movie search ranks exact and near-exact titles before unrelated results', () => {
+  const api = read('./services/api.ts');
+  assert.match(api, /const normalizeSearchTitle/);
+  assert.match(api, /normalizedTitle === normalizedQuery/);
+  assert.match(api, /const prioritizeSearchResults/);
+  assert.match(api, /result\.results = prioritizeSearchResults\(query, result\.results\)/);
+});
+
 test('watch-party fetch timeout failures have a visible error state', () => {
   const client = read('./components/WatchPartyView.tsx');
   const api = read('./services/api.ts');

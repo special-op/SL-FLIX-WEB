@@ -4,6 +4,51 @@ import { safeConsole } from '../utils/productionGuard';
 const VIRTUAL_API_PATH = "/slflix/api/v1";
 const vttBlobCache = new Map<string, string>();
 const SHARED_FETCH_TIMEOUT_MS = 10_000;
+
+const normalizeSearchTitle = (value: string): string => value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+
+const prioritizeSearchResults = (query: string, results: MovieResult[]): MovieResult[] => {
+    const normalizedQuery = normalizeSearchTitle(query);
+    if (!normalizedQuery || results.length < 2) return results;
+
+    const queryTokens = new Set(normalizedQuery.split(' '));
+    return results
+        .map((result, index) => {
+            const normalizedTitle = normalizeSearchTitle(result.title || '');
+            const titleTokens = normalizedTitle ? new Set(normalizedTitle.split(' ')) : new Set<string>();
+            const sameWords = normalizedTitle.length > 0
+                && normalizedTitle.split(' ').length === queryTokens.size
+                && [...queryTokens].every(token => titleTokens.has(token));
+            const queryWordsInTitle = [...queryTokens].every(token => titleTokens.has(token));
+            const titleWordsInQuery = normalizedTitle.length > 0
+                && [...titleTokens].every(token => queryTokens.has(token));
+
+            // Lower ranks are stronger matches. The original index keeps ties stable.
+            let rank = 6;
+            if (normalizedTitle === normalizedQuery) rank = 0;
+            else if (sameWords) rank = 1;
+            else if (normalizedTitle.startsWith(`${normalizedQuery} `)) rank = 2;
+            else if (normalizedQuery.startsWith(`${normalizedTitle} `)) rank = 3;
+            else if (queryWordsInTitle) rank = 4;
+            else if (titleWordsInQuery || normalizedTitle.includes(normalizedQuery)) rank = 5;
+
+            return { result, index, rank, titleLength: normalizedTitle.length };
+        })
+        .sort((a, b) => {
+            const rankDifference = a.rank - b.rank;
+            if (rankDifference !== 0) return rankDifference;
+            if (a.rank < 6 && a.titleLength !== b.titleLength) return a.titleLength - b.titleLength;
+            return a.index - b.index;
+        })
+        .map(({ result }) => result);
+};
+
 async function fetchWithTimeout(input: RequestInfo | URL, options: RequestInit = {}): Promise<Response> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), SHARED_FETCH_TIMEOUT_MS);
@@ -216,6 +261,7 @@ export const ApiService = {
                         nextPage,
                         totalCount
                     };
+                    result.results = prioritizeSearchResults(query, result.results);
                     if (page === 1) {
                         cacheService.set(cacheKey, result, 3 * 60 * 1000);
                     }
@@ -234,6 +280,7 @@ export const ApiService = {
                         nextPage: page + 1,
                         totalCount: fallbackData.totalCount || fallbackData.results.length
                     };
+                    result.results = prioritizeSearchResults(query, result.results);
                     if (page === 1) {
                         cacheService.set(cacheKey, result, 3 * 60 * 1000);
                     }
