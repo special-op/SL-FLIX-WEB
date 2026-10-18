@@ -4,6 +4,8 @@ import NodeCache from 'node-cache';
 import crypto from 'crypto';
 import https from 'https';
 import http from 'http';
+import dns from 'dns/promises';
+import net from 'net';
 import { 
     initIptvStorage, 
     getNormalizedChannels, 
@@ -22,6 +24,248 @@ try {
     console.error('[API] Failed to init iptvStorage:', err);
 }
 const cache = new NodeCache({ stdTTL: 300, checkperiod: 60 });
+const MAX_PROXY_REDIRECTS = 3;
+const PROXY_DNS_TIMEOUT_MS = 3000;
+const PROXY_TIMEOUT_MS = 12000;
+const STREAM_PROXY_TIMEOUT_MS = 15000;
+const STREAM_PROXY_IDLE_TIMEOUT_MS = 30000;
+const MAX_SUBTITLE_BYTES = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_JSON_BYTES = 4 * 1024 * 1024;
+
+// These are provider domains already used by the application. Host matching is
+// exact or subdomain-based so lookalikes such as `evilomegatech.app` do not pass.
+const CONFIGURED_UPSTREAM_HOSTS = [
+    'api.omegatech.app',
+    'stream.omegatech.app',
+    'omegatech-api.dixonomega.tech',
+    'h5-api.aoneroom.com',
+    '123movienow.cc',
+    'cineverse.name.ng',
+    'v3.sg.media-imdb.com',
+    'halahgan.com'
+];
+const IMAGE_PROXY_HOSTS = [
+    'omegatech.app',
+    'televizia.online',
+    '1tv.ge',
+    'aoneroom.com',
+    'comments.ge',
+    'adjaranett.com',
+    'imoviesge.com'
+];
+const ANIME_STREAM_HOSTS = [
+    'oploverz.site',
+    'halahgan.com',
+    'berkasdrive.com',
+    'vidsrc.to',
+    'omegatech.app'
+];
+const ADULT_STREAM_HOSTS = ['xnxx.com', 'xnxx-cdn.com'];
+const SUBTITLE_PROXY_HOSTS = [
+    ...CONFIGURED_UPSTREAM_HOSTS,
+    ...IMAGE_PROXY_HOSTS,
+    ...ANIME_STREAM_HOSTS
+];
+
+function isAllowedProxyHost(hostname, allowedHosts) {
+    const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
+    return allowedHosts.some((allowed) => {
+        const domain = allowed.toLowerCase();
+        return host === domain || host.endsWith(`.${domain}`);
+    });
+}
+
+function isPrivateAddress(address) {
+    if (net.isIPv4(address)) {
+        const octets = address.split('.').map(Number);
+        return octets[0] === 10 || octets[0] === 127 ||
+            (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            (octets[0] === 192 && octets[1] === 168) ||
+            (octets[0] === 169 && octets[1] === 254) ||
+            (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) ||
+            (octets[0] === 198 && (octets[1] === 18 || octets[1] === 19)) ||
+            octets[0] === 0;
+    }
+    if (net.isIPv6(address)) {
+        const normalized = address.toLowerCase();
+        return normalized === '::1' || normalized === '::' ||
+            normalized.startsWith('fc') || normalized.startsWith('fd') ||
+            normalized.startsWith('fe8') || normalized.startsWith('fe9') ||
+            normalized.startsWith('fea') || normalized.startsWith('feb') ||
+            normalized.startsWith('::ffff:127.') || normalized.startsWith('::ffff:10.') ||
+            normalized.startsWith('::ffff:192.168.') || normalized.startsWith('::ffff:172.');
+    }
+    return true;
+}
+
+async function resolvePublicProxyAddress(hostname) {
+    const lookup = dns.lookup(hostname, { all: true, verbatim: true });
+    const records = await Promise.race([
+        lookup,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Proxy DNS timeout')), PROXY_DNS_TIMEOUT_MS))
+    ]);
+    const publicRecord = records.find((record) => !isPrivateAddress(record.address));
+    if (!publicRecord) throw new Error('Proxy destination resolved to a private address');
+    return publicRecord;
+}
+
+function parseAllowedProxyUrl(rawUrl, allowedHosts) {
+    const parsed = new URL(String(rawUrl));
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+        throw new Error('Proxy URL must use HTTP(S) without credentials');
+    }
+    if (!isAllowedProxyHost(parsed.hostname, allowedHosts)) {
+        throw new Error(`Proxy host is not allowlisted: ${parsed.hostname}`);
+    }
+    return parsed;
+}
+
+async function fetchWithValidatedRedirects(rawUrl, options = {}, {
+    allowedHosts = CONFIGURED_UPSTREAM_HOSTS,
+    timeoutMs = PROXY_TIMEOUT_MS
+} = {}) {
+    let currentUrl = String(rawUrl);
+    for (let hop = 0; hop <= MAX_PROXY_REDIRECTS; hop += 1) {
+        const parsed = parseAllowedProxyUrl(currentUrl, allowedHosts);
+        await resolvePublicProxyAddress(parsed.hostname);
+        const response = await fetch(parsed, {
+            ...options,
+            redirect: 'manual',
+            signal: options.signal || AbortSignal.timeout(timeoutMs)
+        });
+        const isRedirect = [301, 302, 303, 307, 308].includes(response.status);
+        if (!isRedirect || !response.headers.get('location')) return response;
+        if (hop === MAX_PROXY_REDIRECTS) {
+            await response.body?.cancel().catch(() => {});
+            throw new Error('Proxy redirect limit exceeded');
+        }
+        const location = response.headers.get('location');
+        await response.body?.cancel().catch(() => {});
+        currentUrl = new URL(location, parsed).toString();
+    }
+    throw new Error('Proxy redirect limit exceeded');
+}
+
+async function readResponseBody(response, maxBytes) {
+    const declaredLength = Number(response.headers.get('content-length'));
+    if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+        throw new Error('Proxy response exceeded size limit');
+    }
+    if (!response.body) {
+        const body = Buffer.from(await response.arrayBuffer());
+        if (body.length > maxBytes) throw new Error('Proxy response exceeded size limit');
+        return body;
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > maxBytes) {
+                await reader.cancel();
+                throw new Error('Proxy response exceeded size limit');
+            }
+            chunks.push(Buffer.from(value));
+        }
+    } finally {
+        reader.releaseLock();
+    }
+    return Buffer.concat(chunks, total);
+}
+
+async function readJsonResponse(response, maxBytes = MAX_JSON_BYTES) {
+    return JSON.parse((await readResponseBody(response, maxBytes)).toString('utf8'));
+}
+
+async function proxyStreamRequest(res, rawUrl, allowedHosts, headers, label, hop = 0) {
+    const parsedUrl = parseAllowedProxyUrl(rawUrl, allowedHosts);
+    const address = await resolvePublicProxyAddress(parsedUrl.hostname);
+    const protocol = parsedUrl.protocol === 'https:' ? https : http;
+    const requestOptions = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || undefined,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'GET',
+        headers,
+        timeout: STREAM_PROXY_TIMEOUT_MS,
+        lookup: (_hostname, options, callback) => { const cb = typeof options === 'function' ? options : callback; const opts = typeof options === 'function' ? {} : (options || {}); if (opts.all) return cb(null, [{ address: address.address, family: address.family }]); return cb(null, address.address, address.family); },
+        ...(parsedUrl.protocol === 'https:' ? { servername: parsedUrl.hostname } : {})
+    };
+    const proxyReq = protocol.request(requestOptions, (proxyRes) => {
+        const statusCode = proxyRes.statusCode || 502;
+        if ([301, 302, 303, 307, 308].includes(statusCode) && proxyRes.headers.location) {
+            proxyRes.resume();
+            if (hop >= MAX_PROXY_REDIRECTS) {
+                return res.status(502).json({ error: `${label} redirect limit exceeded` });
+            }
+            try {
+                const redirectUrl = new URL(proxyRes.headers.location, parsedUrl).toString();
+                return proxyStreamRequest(res, redirectUrl, allowedHosts, headers, label, hop + 1)
+                    .catch((error) => {
+                        console.error(`[${label}] Redirect error:`, error.message);
+                        if (!res.headersSent) res.status(502).end();
+                    });
+            } catch (error) {
+                return res.status(502).json({ error: `${label} returned an invalid redirect` });
+            }
+        }
+
+        res.status(statusCode);
+        Object.entries(proxyRes.headers).forEach(([key, value]) => {
+            const lowerKey = key.toLowerCase();
+            if (lowerKey !== 'access-control-allow-origin' && lowerKey !== 'content-security-policy') {
+                res.setHeader(key, value);
+            }
+        });
+        res.setHeader('Content-Disposition', 'inline');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
+        proxyRes.setTimeout(STREAM_PROXY_IDLE_TIMEOUT_MS, () => {
+            proxyRes.destroy(new Error(`${label} upstream idle timeout`));
+            if (!res.headersSent) res.status(504).end();
+            else res.destroy();
+        });
+        proxyRes.pipe(res);
+    });
+    proxyReq.on('error', (error) => {
+        console.error(`[${label}] Request error:`, error.message);
+        if (!res.headersSent) res.status(502).end();
+        else res.destroy();
+    });
+    proxyReq.on('timeout', () => {
+        proxyReq.destroy(new Error(`${label} upstream timeout`));
+        if (!res.headersSent) res.status(504).end();
+        else res.destroy();
+    });
+    proxyReq.end();
+}
+
+function proxyClientKey(req) {
+    return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function createProxyLimiter(max, windowMs) {
+    return rateLimit({
+        windowMs,
+        max,
+        keyGenerator: proxyClientKey,
+        standardHeaders: true,
+        legacyHeaders: false,
+        message: { error: 'Proxy rate limit exceeded' },
+        validate: { xForwardedForHeader: false, default: false }
+    });
+}
+
+const subtitleLimiter = createProxyLimiter(60, 5 * 60 * 1000);
+const imageProxyLimiter = createProxyLimiter(180, 5 * 60 * 1000);
+const animeStreamLimiter = createProxyLimiter(30, 5 * 60 * 1000);
+const adultStreamLimiter = createProxyLimiter(30, 5 * 60 * 1000);
 const apiLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 1000, 
@@ -68,12 +312,14 @@ async function fetchExternal(url, options = {}, attempt = 1) {
     }
     const delay = Math.min(attempt * 1000, 5000);
     try {
-        const res = await fetch(url, { 
-            ...options, 
-            headers,
-            signal: AbortSignal.timeout(10000) 
+        const res = await fetchWithValidatedRedirects(url, {
+            ...options,
+            headers
+        }, {
+            allowedHosts: CONFIGURED_UPSTREAM_HOSTS,
+            timeoutMs: 10000
         });
-        const text = await res.text();
+        const text = (await readResponseBody(res, MAX_JSON_BYTES)).toString('utf8');
         let data;
         try {
             data = JSON.parse(text);
@@ -378,24 +624,26 @@ function convertSrtToVtt(srtContent) {
     return vtt;
 }
 
-router.get('/subtitle', async (req, res) => {
+router.get('/subtitle', subtitleLimiter, async (req, res) => {
     try {
         const subUrl = req.query.url;
         if (!subUrl) {
             return res.status(400).send('WEBVTT\n\n400 Missing subtitle URL');
         }
         const format = req.query.format || 'vtt';
-        const response = await fetch(subUrl, {
+        const response = await fetchWithValidatedRedirects(String(subUrl), {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Accept': '*/*'
             },
-            signal: AbortSignal.timeout(15000)
+        }, {
+            allowedHosts: SUBTITLE_PROXY_HOSTS,
+            timeoutMs: PROXY_TIMEOUT_MS
         });
         if (!response.ok) {
             return res.status(response.status).send('WEBVTT\n\nFailed to fetch subtitle');
         }
-        const text = await response.text();
+        const text = (await readResponseBody(response, MAX_SUBTITLE_BYTES)).toString('utf8');
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
         res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
@@ -665,9 +913,9 @@ router.get('/suggestions', async (req, res) => {
         if (cached) return res.json(cached);
         const firstLetter = query.charAt(0).toLowerCase();
         const targetUrl = `https://v3.sg.media-imdb.com/suggestion/x/${firstLetter}/${encodeURIComponent(query)}.json`;
-        const response = await fetch(targetUrl);
+        const response = await fetchWithValidatedRedirects(targetUrl);
         if (!response.ok) throw new Error(`IMDb Error: ${response.status}`);
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         cache.set(cacheKey, data);
         res.json(data);
     } catch (error) {
@@ -678,19 +926,13 @@ router.get('/suggestions', async (req, res) => {
         });
     }
 });
-router.get('/tv/img', async (req, res) => {
+router.get('/tv/img', imageProxyLimiter, async (req, res) => {
     const { url } = req.query;
     if (!url) return res.status(400).send('No URL provided');
     try {
-        const decodedUrl = decodeURIComponent(url);
-        if (!decodedUrl.startsWith('http')) return res.redirect(decodedUrl);
-        const isOmegaTv = decodedUrl.includes("omegatech.app") || 
-                          decodedUrl.includes("televizia.online") || 
-                          decodedUrl.includes("1tv.ge") || 
-                          decodedUrl.includes("pbcdnw.aoneroom.com") || 
-                          decodedUrl.includes("comments.ge") ||
-                          decodedUrl.includes("adjaranett.com") ||
-                          decodedUrl.includes("imoviesge.com");
+        const decodedUrl = decodeURIComponent(String(url));
+        const parsedUrl = parseAllowedProxyUrl(decodedUrl, IMAGE_PROXY_HOSTS);
+        const isProviderImage = isAllowedProxyHost(parsedUrl.hostname, IMAGE_PROXY_HOSTS);
         const headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
             'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image*;q=0.8',
@@ -698,12 +940,12 @@ router.get('/tv/img', async (req, res) => {
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive'
         };
-        if (isOmegaTv) {
-            if (decodedUrl.includes("comments.ge")) {
+        if (isProviderImage) {
+            if (isAllowedProxyHost(parsedUrl.hostname, ['comments.ge'])) {
                 headers['Referer'] = 'https://comments.ge/';
-            } else if (decodedUrl.includes("adjaranett.com")) {
+            } else if (isAllowedProxyHost(parsedUrl.hostname, ['adjaranett.com'])) {
                 headers['Referer'] = 'https://adjaranett.com/';
-            } else if (decodedUrl.includes("imoviesge.com")) {
+            } else if (isAllowedProxyHost(parsedUrl.hostname, ['imoviesge.com'])) {
                 headers['Referer'] = 'https://imoviesge.com/';
             } else {
                 headers['Referer'] = 'https://api.omegatech.app/';
@@ -719,27 +961,18 @@ router.get('/tv/img', async (req, res) => {
             }
         };
 
-        const protocol = decodedUrl.startsWith('https') ? https : http;
-        const request = protocol.get(decodedUrl, { headers, timeout: 8000 }, (proxyRes) => {
-            if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
-                return res.redirect(`/api/tv/img?url=${encodeURIComponent(proxyRes.headers.location)}`);
-            }
-            if (proxyRes.statusCode !== 200) {
-                console.warn(`[IMG PROXY] Upstream status ${proxyRes.statusCode} for ${decodedUrl}, sending SVG fallback.`);
-                return sendFallback();
-            }
-            res.setHeader('Content-Type', proxyRes.headers['content-type'] || 'image/jpeg');
-            res.setHeader('Cache-Control', 'public, max-age=86400');
-            proxyRes.pipe(res);
+        const response = await fetchWithValidatedRedirects(parsedUrl.toString(), { headers }, {
+            allowedHosts: IMAGE_PROXY_HOSTS,
+            timeoutMs: 8000
         });
-        request.on('error', (err) => {
-            console.warn(`[IMG PROXY] Request error for ${decodedUrl}:`, err.message);
-            sendFallback();
-        });
-        request.on('timeout', () => {
-            request.destroy();
-            sendFallback();
-        });
+        if (!response.ok) {
+            console.warn(`[IMG PROXY] Upstream status ${response.status} for ${decodedUrl}, sending SVG fallback.`);
+            return sendFallback();
+        }
+        const body = await readResponseBody(response, MAX_IMAGE_BYTES);
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.status(200).send(body);
     } catch (error) {
         console.warn(`[IMG PROXY] Catch error:`, error.message);
         if (!res.headersSent) {
@@ -1075,12 +1308,12 @@ router.get('/anime/home', async (req, res) => {
 
         // 1. Try Omegatech Oploverz (Live Indonesian Sub Anime with real posters and streaming sources)
         try {
-            const opRes = await fetch('https://api.omegatech.app/api/Anime/Oploverz?action=home', {
+            const opRes = await fetchWithValidatedRedirects('https://api.omegatech.app/api/Anime/Oploverz?action=home', {
                 signal: AbortSignal.timeout(8000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (opRes.ok) {
-                const opJson = await opRes.json();
+                const opJson = await readJsonResponse(opRes);
                 if (opJson && opJson.data) {
                     const rawTrending = opJson.data.trending || [];
                     const rawLatest = opJson.data.latestEpisodes || [];
@@ -1115,12 +1348,12 @@ router.get('/anime/home', async (req, res) => {
         // 2. Try Omegatech Nimegami (Indonesian Sub Anime Scraper)
         try {
             const targetUrl = 'https://api.omegatech.app/api/Anime/Nimegami?action=home';
-            const directRes = await fetch(targetUrl, { 
+            const directRes = await fetchWithValidatedRedirects(targetUrl, {
                 signal: AbortSignal.timeout(10000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (directRes.ok) {
-                const directData = await directRes.json();
+                const directData = await readJsonResponse(directRes);
                 if (directData && directData.data && Array.isArray(directData.data) && directData.data.length > 0) {
                     const result = { success: true, data: directData.data };
                     cache.set(cacheKey, result, 1800);
@@ -1160,7 +1393,7 @@ router.get('/anime/crunchyroll', async (req, res) => {
         const cached = cache.get(cacheKey);
         if (cached) return res.json(cached);
 
-        const response = await fetch(targetUrl, {
+        const response = await fetchWithValidatedRedirects(targetUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Origin': 'https://moviebox.ph',
@@ -1168,7 +1401,7 @@ router.get('/anime/crunchyroll', async (req, res) => {
             },
             signal: AbortSignal.timeout(10000)
         });
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         cache.set(cacheKey, data, 600);
         res.json(data);
     } catch (error) {
@@ -1186,12 +1419,12 @@ router.get('/anime/search', async (req, res) => {
 
         // 1. Try Crunchyroll API search first
         try {
-            const crRes = await fetch(`https://api.omegatech.app/api/Anime/Crunchyroll?action=search&q=${encodeURIComponent(query)}`, {
+            const crRes = await fetchWithValidatedRedirects(`https://api.omegatech.app/api/Anime/Crunchyroll?action=search&q=${encodeURIComponent(query)}`, {
                 signal: AbortSignal.timeout(8000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (crRes.ok) {
-                const crJson = await crRes.json();
+                const crJson = await readJsonResponse(crRes);
                 const list = crJson.data?.results || [];
                 if (Array.isArray(list) && list.length > 0) {
                     const normalized = list.map(item => ({
@@ -1213,12 +1446,12 @@ router.get('/anime/search', async (req, res) => {
 
         // 2. Try Omegatech Oploverz search
         try {
-            const opRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`, {
+            const opRes = await fetchWithValidatedRedirects(`https://api.omegatech.app/api/Anime/Oploverz?action=search&query=${encodeURIComponent(query)}`, {
                 signal: AbortSignal.timeout(8000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (opRes.ok) {
-                const opJson = await opRes.json();
+                const opJson = await readJsonResponse(opRes);
                 const list = opJson.data?.data || opJson.data?.results || (Array.isArray(opJson.data) ? opJson.data : []);
                 if (Array.isArray(list) && list.length > 0) {
                     const normalized = list.map(item => ({
@@ -1239,12 +1472,12 @@ router.get('/anime/search', async (req, res) => {
         // 2. Try Omegatech Nimegami search
         try {
             const targetUrl = `https://api.omegatech.app/api/Anime/Nimegami?action=search&query=${encodeURIComponent(query)}`;
-            const directRes = await fetch(targetUrl, { 
+            const directRes = await fetchWithValidatedRedirects(targetUrl, {
                 signal: AbortSignal.timeout(10000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (directRes.ok) {
-                const directData = await directRes.json();
+                const directData = await readJsonResponse(directRes);
                 if (directData && directData.data && Array.isArray(directData.data) && directData.data.length > 0) {
                     const result = { success: true, data: directData.data };
                     cache.set(cacheKey, result, 600);
@@ -1272,12 +1505,12 @@ router.get('/anime/detail', async (req, res) => {
         // 1. If it's an Oploverz URL or series
         if (url.includes('oploverz.site') || url.includes('oploverz')) {
             try {
-                const opRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=detail&url=${encodeURIComponent(url)}`, {
+                const opRes = await fetchWithValidatedRedirects(`https://api.omegatech.app/api/Anime/Oploverz?action=detail&url=${encodeURIComponent(url)}`, {
                     signal: AbortSignal.timeout(8000),
                     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
                 });
                 if (opRes.ok) {
-                    const opJson = await opRes.json();
+                    const opJson = await readJsonResponse(opRes);
                     if (opJson && opJson.data) {
                         const d = opJson.data;
                         let streamSources = [];
@@ -1285,12 +1518,12 @@ router.get('/anime/detail', async (req, res) => {
                         const targetWatchUrl = d.watchUrl || d.episodes?.[0]?.url;
                         if (targetWatchUrl) {
                             try {
-                                const wRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=watch&url=${encodeURIComponent(targetWatchUrl)}`, {
+                                const wRes = await fetchWithValidatedRedirects(`https://api.omegatech.app/api/Anime/Oploverz?action=watch&url=${encodeURIComponent(targetWatchUrl)}`, {
                                     signal: AbortSignal.timeout(6000),
                                     headers: { 'User-Agent': 'Mozilla/5.0' }
                                 });
                                 if (wRes.ok) {
-                                    const wJson = await wRes.json();
+                                    const wJson = await readJsonResponse(wRes);
                                     streamSources = wJson.data?.streamSources || [];
                                     downloadOptions = wJson.data?.downloadOptions || [];
                                 }
@@ -1339,12 +1572,12 @@ router.get('/anime/detail', async (req, res) => {
         // 2. Try Omegatech Nimegami detail
         try {
             const targetUrl = `https://api.omegatech.app/api/Anime/Nimegami?action=detail&url=${encodeURIComponent(url)}`;
-            const directRes = await fetch(targetUrl, { 
+            const directRes = await fetchWithValidatedRedirects(targetUrl, {
                 signal: AbortSignal.timeout(10000),
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
             });
             if (directRes.ok) {
-                const directData = await directRes.json();
+                const directData = await readJsonResponse(directRes);
                 if (directData && directData.data) {
                     cache.set(cacheKey, directData.data, 3600);
                     return res.json(directData.data);
@@ -1365,17 +1598,18 @@ router.get('/anime/stream-resolve', async (req, res) => {
     if (!url) return res.status(400).json({ success: false, error: "Missing url parameter" });
 
     try {
-        const decodedUrl = decodeURIComponent(url);
-        
+        const decodedUrl = decodeURIComponent(String(url));
+        const requestedUrl = parseAllowedProxyUrl(decodedUrl, ANIME_STREAM_HOSTS);
+
         // 0. If it's an Oploverz watch URL
-        if (decodedUrl.includes('oploverz.site') || decodedUrl.includes('oploverz')) {
+        if (isAllowedProxyHost(requestedUrl.hostname, ['oploverz.site'])) {
             try {
-                const wRes = await fetch(`https://api.omegatech.app/api/Anime/Oploverz?action=watch&url=${encodeURIComponent(decodedUrl)}`, {
+                const wRes = await fetchWithValidatedRedirects(`https://api.omegatech.app/api/Anime/Oploverz?action=watch&url=${encodeURIComponent(decodedUrl)}`, {
                     signal: AbortSignal.timeout(7000),
                     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
                 });
                 if (wRes.ok) {
-                    const wJson = await wRes.json();
+                    const wJson = await readJsonResponse(wRes);
                     const sources = wJson.data?.streamSources || [];
                     if (sources.length > 0) {
                         const top = sources[0];
@@ -1394,18 +1628,18 @@ router.get('/anime/stream-resolve', async (req, res) => {
         }
 
         // 1. If it's a stordl.halahgan.com or berkasdrive link
-        if (decodedUrl.includes('stordl.halahgan.com') || decodedUrl.includes('halahgan.com')) {
+        if (isAllowedProxyHost(requestedUrl.hostname, ['halahgan.com', 'berkasdrive.com'])) {
             try {
-                const parsed = new URL(decodedUrl);
+                const parsed = requestedUrl;
                 const pathParts = parsed.pathname.split('/').filter(Boolean);
                 const fileId = pathParts[0] === 'streaming' ? pathParts[1] : pathParts[0];
                 const fileName = parsed.searchParams.get('name') || name || '';
 
                 if (fileId) {
                     const apiUrl = `https://stordl.halahgan.com/${fileId}?action=file-url&id=${fileId}&name=${encodeURIComponent(fileName)}`;
-                    const directRes = await fetch(apiUrl, { signal: AbortSignal.timeout(6000) });
+                    const directRes = await fetchWithValidatedRedirects(apiUrl, { signal: AbortSignal.timeout(6000) });
                     if (directRes.ok) {
-                        const directData = await directRes.json();
+                        const directData = await readJsonResponse(directRes);
                         if (directData && directData.ok && directData.url) {
                             return res.json({
                                 success: true,
@@ -1450,82 +1684,28 @@ router.get('/anime/stream-resolve', async (req, res) => {
             type: 'embed'
         });
     } catch (err) {
-        console.warn('[ANIME] stream-resolve fallback catch:', err.message);
-        const fallbackUrl = req.query.url ? decodeURIComponent(String(req.query.url)) : 'https://vidsrc.to/embed/anime/1';
-        return res.json({
-            success: true,
-            directUrl: fallbackUrl,
-            streamProxyUrl: fallbackUrl,
-            embedUrl: fallbackUrl,
-            type: 'embed'
-        });
+        console.warn('[ANIME] stream-resolve rejected URL:', err.message);
+        return res.status(400).json({ success: false, error: 'Invalid or disallowed stream URL' });
     }
 });
 
-router.get('/anime/stream-proxy', async (req, res) => {
+router.get('/anime/stream-proxy', animeStreamLimiter, async (req, res) => {
     try {
         const { url } = req.query;
         if (!url) return res.status(400).end();
 
-        const decodedUrl = decodeURIComponent(url);
-        const parsedUrl = new URL(decodedUrl);
-
-        const options = {
-            hostname: parsedUrl.hostname,
-            path: parsedUrl.pathname + parsedUrl.search,
-            method: 'GET',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Referer': parsedUrl.origin + '/',
-                'Origin': parsedUrl.origin
-            }
+        const decodedUrl = decodeURIComponent(String(url));
+        const parsedUrl = parseAllowedProxyUrl(decodedUrl, ANIME_STREAM_HOSTS);
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Referer': parsedUrl.origin + '/',
+            'Origin': parsedUrl.origin
         };
-
-        if (req.headers.range) {
-            options.headers['Range'] = req.headers.range;
-        }
-
-        const protocol = parsedUrl.protocol === 'https:' ? https : http;
-        const proxyReq = protocol.request(options, (proxyRes) => {
-            // Handle redirects
-            if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
-                let redirectUrl = proxyRes.headers.location;
-                if (redirectUrl.startsWith('/')) {
-                    redirectUrl = parsedUrl.origin + redirectUrl;
-                }
-                res.redirect(`/api/anime/stream-proxy?url=${encodeURIComponent(redirectUrl)}`);
-                return;
-            }
-
-            res.status(proxyRes.statusCode);
-
-            Object.keys(proxyRes.headers).forEach(key => {
-                const lowerKey = key.toLowerCase();
-                if (lowerKey === 'content-disposition') {
-                    res.setHeader('Content-Disposition', 'inline');
-                } else if (lowerKey !== 'access-control-allow-origin' && lowerKey !== 'content-security-policy') {
-                    res.setHeader(key, proxyRes.headers[key]);
-                }
-            });
-
-            res.setHeader('Content-Disposition', 'inline');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Accept');
-            res.setHeader('Access-Control-Expose-Headers', 'Content-Range, Content-Length, Accept-Ranges');
-
-            proxyRes.pipe(res);
-        });
-
-        proxyReq.on('error', (err) => {
-            console.error('[ANIME PROXY] Stream error:', err.message);
-            if (!res.headersSent) res.status(502).end();
-        });
-
-        proxyReq.end();
+        if (req.headers.range) headers.Range = req.headers.range;
+        await proxyStreamRequest(res, parsedUrl.toString(), ANIME_STREAM_HOSTS, headers, 'ANIME PROXY');
     } catch (err) {
         console.error('[ANIME PROXY] Catch Error:', err.message);
-        if (!res.headersSent) res.status(500).end();
+        if (!res.headersSent) res.status(400).json({ error: 'Invalid or disallowed stream URL' });
     }
 });
 
@@ -1555,6 +1735,7 @@ router.get('/adult/xnxx', async (req, res) => {
         if (action === 'search') {
             targetUrl += `&query=${encodeURIComponent(query || 'Trending')}&page=${page}`;
         } else if (action === 'detail' && url) {
+            parseAllowedProxyUrl(String(url), ADULT_STREAM_HOSTS);
             targetUrl += `&url=${encodeURIComponent(url)}`;
         }
         const data = await fetchExternal(targetUrl);
@@ -1565,56 +1746,23 @@ router.get('/adult/xnxx', async (req, res) => {
     }
 });
 
-router.get('/adult/stream', async (req, res) => {
+router.get('/adult/stream', adultStreamLimiter, async (req, res) => {
     try {
         const { url } = req.query;
         if (!url) return res.status(400).end();
 
-        const decodedUrl = decodeURIComponent(url);
-        const parsedUrl = new URL(decodedUrl);
-
-        const options = {
-            hostname: parsedUrl.hostname,
-            path: parsedUrl.pathname + parsedUrl.search,
-            method: 'GET',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Referer': 'https://www.xnxx.com/',
-                'Origin': 'https://www.xnxx.com',
-            }
+        const decodedUrl = decodeURIComponent(String(url));
+        const parsedUrl = parseAllowedProxyUrl(decodedUrl, ADULT_STREAM_HOSTS);
+        const headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Referer': 'https://www.xnxx.com/',
+            'Origin': 'https://www.xnxx.com'
         };
-
-        if (req.headers.range) {
-            options.headers['Range'] = req.headers.range;
-        }
-
-        const protocol = parsedUrl.protocol === 'https:' ? https : http;
-        const proxyReq = protocol.request(options, (proxyRes) => {
-            res.status(proxyRes.statusCode);
-
-            Object.keys(proxyRes.headers).forEach(key => {
-                if (key.toLowerCase() !== 'access-control-allow-origin') {
-                    res.setHeader(key, proxyRes.headers[key]);
-                }
-            });
-
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Range');
-
-            proxyRes.pipe(res);
-        });
-
-        proxyReq.on('error', (err) => {
-            console.error('[STREAM PROXY] Request error:', err.message);
-            if (!res.headersSent) res.status(502).end();
-        });
-
-        proxyReq.end();
+        if (req.headers.range) headers.Range = req.headers.range;
+        await proxyStreamRequest(res, parsedUrl.toString(), ADULT_STREAM_HOSTS, headers, 'STREAM PROXY');
     } catch (err) {
         console.error('[STREAM PROXY] Catch Error:', err.message);
-        if (!res.headersSent) res.status(500).end();
+        if (!res.headersSent) res.status(400).json({ error: 'Invalid or disallowed stream URL' });
     }
 });
-
 export default router;
