@@ -10,10 +10,11 @@ export interface ChapterMarker {
 export interface WatchPartyProps {
   isHost: boolean;
   viewersCount: number;
-  viewersList: Array<{ id: string; name: string; isCreator?: boolean }>;
+  viewersList: Array<{ id: string; name: string; isCreator?: boolean; buffering?: boolean }>;
   inStreamChat?: { username: string; message: string } | null;
   pauseNotice?: string | null;
   onHostAction?: (action: 'play' | 'pause' | 'seek', time: number) => void;
+  onBufferingChange?: (buffering: boolean) => void;
   syncTime?: number;
   syncPaused?: boolean;
   syncTimestamp?: number;

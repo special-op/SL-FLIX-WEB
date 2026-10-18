@@ -160,7 +160,7 @@ export const VideoHud: React.FC<VideoHudProps> = ({
             <div className="flex items-center gap-2">
               <h2 className="text-white font-bold text-sm truncate max-w-[200px]">{title}</h2>
               {watchPartyProps && (
-                <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-primary/30 text-[11px] font-bold text-white">
+                <div className="flex items-center gap-1.5 flex-wrap bg-black/60 backdrop-blur-md px-2.5 py-0.5 rounded-full border border-primary/30 text-[11px] font-bold text-white">
                   <span className="relative flex h-2 w-2">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
@@ -181,6 +181,14 @@ export const VideoHud: React.FC<VideoHudProps> = ({
               )}
             </div>
             {subTitle && <p className="text-gray-400 text-xs">{subTitle}</p>}
+            {watchPartyProps && watchPartyProps.viewersList.some(viewer => viewer.buffering) && (
+              <div className="mt-1 inline-flex max-w-[min(90vw,28rem)] items-center gap-1.5 rounded-full border border-amber-400/30 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold text-amber-200" title="Participants currently buffering">
+                <i className="fa-solid fa-spinner fa-spin text-[9px]" />
+                <span className="truncate">
+                  Buffering: {watchPartyProps.viewersList.filter(viewer => viewer.buffering).map(viewer => viewer.name).join(', ')}
+                </span>
+              </div>
+            )}
           </div>
         </div>
         <div className="flex gap-2">
