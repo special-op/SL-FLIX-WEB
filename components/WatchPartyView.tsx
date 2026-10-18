@@ -158,6 +158,7 @@ export const WatchPartyView: React.FC<{
     const [chatMessages, setChatMessages] = useState<{ id?: string; username: string; message: string; timestamp: number }[]>([]);
     const [chatInput, setChatInput] = useState('');
     const [sidebarTab, setSidebarTab] = useState<'chat' | 'participants'>('chat');
+    const [roomView, setRoomView] = useState<'watch' | 'games'>('watch');
     const [inStreamLatestChat, setInStreamLatestChat] = useState<{ username: string; message: string } | null>(null);
     const [pauseNotice, setPauseNotice] = useState<string | null>(null);
     const [inviteCopied, setInviteCopied] = useState(false);
@@ -400,9 +401,10 @@ export const WatchPartyView: React.FC<{
 
         // User kicked from room by creator
         s.on('room_kicked', (data: { roomId: string; message: string }) => {
-            alert(data.message || 'You were removed from this Watch Party session and cannot rejoin.');
-            setCurrentRoom(null);
-            setSelectedMovie(null);
+             alert(data.message || 'You were removed from this Watch Party session and cannot rejoin.');
+             setCurrentRoom(null);
+             setRoomView('watch');
+             setSelectedMovie(null);
             setSources([]);
             setSubtitles([]);
             setChatMessages([]);
@@ -433,8 +435,9 @@ export const WatchPartyView: React.FC<{
         s.on('room_ended', (data: { roomId: string; message: string; endedBy: string }) => {
             setPauseNotice(data.message || 'This watch party has been ended by the host.');
             setTimeout(() => {
-                setCurrentRoom(null);
-                setSelectedMovie(null);
+                     setCurrentRoom(null);
+                     setRoomView('watch');
+                     setSelectedMovie(null);
                 setSources([]);
                  setSubtitles([]);
                  setChatMessages([]);
@@ -975,6 +978,7 @@ export const WatchPartyView: React.FC<{
             // keep the host token on Leave so the host can reclaim the room (End Party still clears it)
         }
         setCurrentRoom(null);
+        setRoomView('watch');
         setSelectedMovie(null);
         setSources([]);
         setSubtitles([]);
@@ -994,6 +998,7 @@ export const WatchPartyView: React.FC<{
         socket.emit('kill_room', { roomId: rId, username });
         if (currentRoom && currentRoom.roomId === rId) {
             setCurrentRoom(null);
+            setRoomView('watch');
             setSelectedMovie(null);
             setSources([]);
             setSubtitles([]);
@@ -1239,9 +1244,9 @@ export const WatchPartyView: React.FC<{
                                  <i className="fa-solid fa-rotate animate-spin"></i>
                                  <span>Reconnecting...</span>
                              </div>
-                         )}
-                     </div>
-                 </div>
+                             )}
+                           </div>
+                      </div>
 
                   {joinRequestState !== 'idle' && !currentRoom && (
                       <div className={`mb-6 rounded-2xl border px-4 py-3 text-sm flex items-center gap-3 ${joinRequestState === 'denied' ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-100'}`} role="status" aria-live="polite">
@@ -1292,7 +1297,7 @@ export const WatchPartyView: React.FC<{
                          {entryTab === 'join' && !targetRoomId && (
                              <form onSubmit={handleJoinByCode} className="flex min-w-0 flex-1 gap-2 sm:max-w-md">
                                  <label htmlFor="watch-party-code" className="sr-only">Join watch party by code</label>
-                                 <input
+                                     <input
                                      id="watch-party-code"
                                      value={joinCodeInput}
                                      onChange={e => setJoinCodeInput(e.target.value.toUpperCase())}
@@ -1305,7 +1310,7 @@ export const WatchPartyView: React.FC<{
                              </form>
                          )}
                      </div>
-                      {entryTab === 'join' ? (
+                       {entryTab !== 'create' ? (
                          targetRoomId ? (
                              <div className="mx-auto max-w-2xl rounded-3xl border border-cyan-500/30 bg-[#121322] p-5 shadow-2xl sm:p-7">
                                  {(() => {
@@ -1397,37 +1402,51 @@ export const WatchPartyView: React.FC<{
                              </form>
                          )
                      ) : (
-                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-                        {/* Room Creation Card */}
-                        <div className="bg-[#121322] border border-white/10 rounded-3xl p-6 shadow-2xl">
-                            <h2 className="text-lg font-bold mb-4 flex items-center gap-2 text-cyan-400">
-                                <i className="fa-solid fa-circle-plus"></i> Create Watch Party Room
-                            </h2>
-                            <form onSubmit={handleCreateRoom} className="space-y-4">
+                      <div className="mx-auto max-w-4xl">
+                         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                             <div>
+                                 <p className="text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300">Build your screening room</p>
+                                 <h2 className="mt-1 text-2xl font-black tracking-tight text-white sm:text-3xl">Create a watch party</h2>
+                                 <p className="mt-2 max-w-2xl text-xs leading-relaxed text-gray-400">Set the room rules, choose what to watch, and invite your people when you are ready.</p>
+                             </div>
+                             <span className="hidden items-center gap-2 text-[10px] font-black uppercase tracking-wider text-gray-500 sm:flex"><i className="fa-solid fa-circle-1 text-cyan-300"></i> Room setup <i className="fa-solid fa-arrow-right text-gray-700"></i> Invite</span>
+                         </div>
+                         {/* Room Creation Card */}
+                         <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 shadow-2xl sm:p-7">
+                             <div className="mb-6 flex items-start gap-3 border-b border-white/10 pb-5">
+                                 <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-cyan-400/10 text-cyan-300"><i className="fa-solid fa-circle-plus"></i></span>
+                                 <div><h2 className="text-lg font-black text-white">Room details</h2><p className="mt-1 text-[11px] text-gray-500">Guests will see this identity in the lobby and invite preview.</p></div>
+                             </div>
+                             <form onSubmit={handleCreateRoom} className="space-y-4">
                                 <div>
-                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Your Display Name</label>
+                                     <label className="mb-1.5 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-gray-400"><i className="fa-solid fa-user text-cyan-300"></i>Your Display Name</label>
                                     <input 
                                         type="text" 
                                         value={username} 
                                         onChange={(e) => setUsername(e.target.value)} 
                                         className="w-full bg-white/5 border border-white/10 rounded-xl py-2 px-3 text-white text-xs outline-none focus:border-cyan-500 font-bold"
-                                        placeholder="Enter your nickname"
+                                         placeholder="How guests see you"
                                         required 
                                     />
-                                </div>
-                                <div>
-                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Room Name</label>
+                                     <p className="mt-1.5 text-[10px] text-gray-600">This appears beside your messages and host badge.</p>
+                                 </div>
+                                 <div>
+                                     <label className="mb-1.5 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-gray-400"><i className="fa-solid fa-heading text-cyan-300"></i>Room Name</label>
                                     <input 
                                         type="text" 
                                         value={roomNameInput} 
                                         onChange={(e) => setRoomNameInput(e.target.value)} 
                                         className="w-full bg-white/5 border border-white/10 rounded-xl py-2 px-3 text-white text-xs outline-none focus:border-cyan-500"
-                                        placeholder="e.g. Cinema Night with Friends"
-                                        required 
-                                    />
-                                </div>
-                                 <div>
-                                     <label htmlFor="watch-party-entry-mode" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Guest Entry Mode</label>
+                                         placeholder="Friday night cinema"
+                                         required
+                                     />
+                                     <p className="mt-1.5 text-[10px] text-gray-600">A memorable title helps friends find the right room.</p>
+                                 </div>
+                                  <div className="border-t border-white/10 pt-5">
+                                      <div className="mb-3 flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-purple-400/10 text-[11px] text-purple-300"><i className="fa-solid fa-shield-halved"></i></span><div><p className="text-[11px] font-black text-white">Access & privacy</p><p className="text-[10px] text-gray-600">Choose how guests enter and where the room appears.</p></div></div>
+                                  </div>
+                                  <div>
+                                      <label htmlFor="watch-party-entry-mode" className="mb-1.5 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-gray-400"><i className="fa-solid fa-door-open text-purple-300"></i>Guest Entry Mode</label>
                                         <select
                                             id="watch-party-entry-mode"
                                             value={createEntryMode}
@@ -1437,9 +1456,10 @@ export const WatchPartyView: React.FC<{
                                         <option value="manual">Manual Approval</option>
                                         <option value="auto">Auto-Enter</option>
                                      </select>
-                                 </div>
-                                 <div>
-                                     <label htmlFor="watch-party-visibility" className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">Room visibility</label>
+                                      <p className="mt-1.5 text-[10px] text-gray-600">{createEntryMode === 'manual' ? 'You approve each guest request.' : 'Anyone with the link can enter immediately.'}</p>
+                                  </div>
+                                  <div>
+                                      <label htmlFor="watch-party-visibility" className="mb-1.5 flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-gray-400"><i className={`fa-solid ${createVisibility === 'public' ? 'fa-globe' : 'fa-lock'} text-emerald-300`}></i>Room visibility</label>
                                      <select
                                          id="watch-party-visibility"
                                          value={createVisibility}
@@ -1449,14 +1469,17 @@ export const WatchPartyView: React.FC<{
                                          <option value="public">Public — show in Discover</option>
                                          <option value="private">Private — invite/code only</option>
                                      </select>
-                                     <p className="mt-1 text-[10px] text-gray-500">Private rooms are never promoted in the public list.</p>
+                                      <p className="mt-1.5 text-[10px] text-gray-600">{createVisibility === 'public' ? 'Anyone can browse this room in Discover.' : 'Private rooms stay out of the public directory.'}</p>
                                  </div>
 
-                                {/* Main Search Engine Picker */}
-                                <div>
-                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1 flex items-center justify-between">
-                                        <span>Pick Movie or Series</span>
-                                        <span className="text-cyan-400 font-normal">Main Search Engine</span>
+                                 {/* Main Search Engine Picker */}
+                                 <div className="border-t border-white/10 pt-5">
+                                     <div className="mb-3 flex items-center gap-2"><span className="flex h-7 w-7 items-center justify-center rounded-lg bg-pink-400/10 text-[11px] text-pink-300"><i className="fa-solid fa-film"></i></span><div><p className="text-[11px] font-black text-white">Choose a title</p><p className="text-[10px] text-gray-600">Search the catalog or browse a category.</p></div></div>
+                                 </div>
+                                 <div>
+                                     <label className="mb-1.5 flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-gray-400">
+                                         <span className="flex items-center gap-2"><i className="fa-solid fa-film text-pink-300"></i>Pick Movie or Series</span>
+                                         <span className="font-normal text-cyan-400">Catalog search</span>
                                     </label>
                                      <div className="relative mb-2">
                                         <input 
@@ -1523,7 +1546,8 @@ export const WatchPartyView: React.FC<{
                         </div>
 
                         {/* Active Rooms Listing */}
-                        <div className="lg:col-span-2 bg-[#121322] border border-white/10 rounded-3xl p-6 shadow-2xl">
+                         {false && (
+                         <div>
                             <h2 className="text-lg font-bold mb-4 flex items-center justify-between text-purple-400">
                                 <span className="flex items-center gap-2">
                                     <i className="fa-solid fa-satellite-dish"></i> Live Watch Parties ({activeRooms.length})
@@ -1604,11 +1628,11 @@ export const WatchPartyView: React.FC<{
                                         </div>
                                     ))}
                                 </div>
-                            )}
-                         </div>
-                     </div>
-                     )}
-                     </>
+                             )}
+                          </div>)}
+                      </div>
+                      )}
+                      </>
                  ) : (
                     /* INSIDE ACTIVE ROOM: UNIFIED GLOBAL STREAMING PLAYER & REAL-TIME PARTY CONTROLS */
                     <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
@@ -1725,10 +1749,11 @@ export const WatchPartyView: React.FC<{
                             })()}
 
                             {/* ROOM CONTROLS & TIMERS BAR */}
-                            <div className="bg-[#121322] border border-white/10 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-4">
-                                <div>
-                                    <div className="text-xs text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-2">
-                                        <span>Room: {currentRoom.roomName} (#{currentRoom.roomId})</span>
+                             <div className="rounded-3xl border border-white/10 bg-[#121322] p-4 shadow-xl sm:p-5">
+                                 <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                                 <div className="min-w-0">
+                                     <div className="text-xs text-cyan-400 font-bold uppercase tracking-wider flex items-center gap-2">
+                                         <span>Room: {currentRoom.roomName} (#{currentRoom.roomId})</span>
                                         {isCreator && (
                                             <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                                                 <i className="fa-solid fa-crown text-[10px] text-amber-300"></i>
@@ -1736,11 +1761,16 @@ export const WatchPartyView: React.FC<{
                                             </span>
                                         )}
                                     </div>
-                                    <div className="text-sm font-extrabold text-white mt-0.5">
-                                        Now Watching: {selectedMovie?.title || currentRoom.movie?.title}
-                                    </div>
-                                </div>
-                                <div className="flex items-center flex-wrap gap-2">
+                                     <div className="text-sm font-extrabold text-white mt-0.5">
+                                         Now Watching: {selectedMovie?.title || currentRoom.movie?.title}
+                                     </div>
+                                     <div className="mt-3 flex w-fit items-center gap-1 rounded-xl border border-white/10 bg-black/25 p-1" role="tablist" aria-label="Room workspace">
+                                         <button type="button" role="tab" aria-selected={roomView === 'watch'} onClick={() => setRoomView('watch')} className={`min-h-9 rounded-lg px-3 text-[11px] font-black transition-colors ${roomView === 'watch' ? 'bg-cyan-400 text-black' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}><i className="fa-solid fa-tv mr-1.5"></i>Watch</button>
+                                         <button type="button" role="tab" aria-selected={roomView === 'games'} onClick={() => setRoomView('games')} className={`min-h-9 rounded-lg px-3 text-[11px] font-black transition-colors ${roomView === 'games' ? 'bg-fuchsia-300 text-[#170b20]' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}><i className="fa-solid fa-gamepad mr-1.5"></i>Games{(guessPosterGame || triviaGame || partyGame) && <span className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-fuchsia-400/20 px-1 text-[9px]">●</span>}</button>
+                                     </div>
+                                 </div>
+                                 <div className="flex w-full flex-wrap items-center gap-3 lg:w-auto lg:justify-end">
+                                     <div className="flex flex-wrap items-center gap-2" aria-label="Playback and session controls">
                                     {isCreator ? (
                                         <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs font-bold text-amber-200">
                                             <i className="fa-solid fa-door-open text-amber-300"></i>
@@ -1837,7 +1867,9 @@ export const WatchPartyView: React.FC<{
                                         )}
                                     </div>
 
-                                     {isCreator && waitExpiresAt && waitRemainingMs > 0 && (
+                                     </div>
+                                     <div className="flex flex-wrap items-center gap-2 border-t border-white/10 pt-3 lg:border-l lg:border-t-0 lg:pl-3 lg:pt-0" aria-label="Invite and room controls">
+                                      {isCreator && waitExpiresAt && waitRemainingMs > 0 && (
 
                                          <div role="status" className="px-3 py-2 bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-bold rounded-xl flex items-center gap-2">
 
@@ -1903,7 +1935,9 @@ export const WatchPartyView: React.FC<{
                                          </div>
                                      )}
 
-                                    {/* Leave Room */}
+                                     </div>
+
+                                     {/* Leave Room */}
                                     <button 
                                         onClick={handleLeaveRoom}
                                         className="px-3.5 py-2 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition-all cursor-pointer"
@@ -1922,11 +1956,18 @@ export const WatchPartyView: React.FC<{
                                             <span>End Party</span>
                                         </button>
                                     )}
-                                </div>
-                            </div>
+                                 </div>
+                             </div>
+                             </div>
 
-                            {/* WAITING-ROOM GAME: GUESS THE POSTER */}
-                            <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4" aria-labelledby="guess-poster-title">
+                             {roomView === 'games' && (
+                              <div className="space-y-4 rounded-3xl border border-fuchsia-400/20 bg-[linear-gradient(145deg,rgba(30,18,48,.84),rgba(8,13,27,.96))] p-3 shadow-2xl sm:p-4">
+                                 <div className="flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-center sm:justify-between">
+                                     <div className="flex items-start gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-fuchsia-400/15 text-fuchsia-200"><i className="fa-solid fa-gamepad"></i></span><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-fuchsia-200">Room arcade</p><h2 className="mt-1 text-lg font-black text-white">Play together while you watch</h2><p className="mt-1 text-[11px] text-gray-400">Games stay tucked away until your group is ready. Hosts can open a round below.</p></div></div>
+                                     <button type="button" onClick={() => setRoomView('watch')} className="min-h-10 rounded-xl border border-white/10 bg-white/5 px-3 text-[11px] font-black text-gray-300 hover:bg-white/10 hover:text-white"><i className="fa-solid fa-arrow-left mr-1.5"></i>Back to watch</button>
+                                 </div>
+                             {/* WAITING-ROOM GAME: GUESS THE POSTER */}
+                             <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4" aria-labelledby="guess-poster-title">
                                 <div className="flex flex-wrap items-center justify-between gap-2">
                                     <div>
                                         <div className="flex items-center gap-2"><span className="rounded-full bg-purple-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-purple-200">Poster quiz</span><span className="text-[10px] text-purple-300/70">5 rounds · 20 sec each</span></div>
@@ -2095,8 +2136,10 @@ export const WatchPartyView: React.FC<{
                                          </aside>
                                      </div>
                                  )}
-                             </section>
-                         </div>
+                              </section>
+                             </div>
+                              )}
+                           </div>
 
                         {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
                          <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 flex flex-col min-h-[420px] h-[min(580px,calc(100dvh-12rem))] lg:h-[580px] shadow-2xl">

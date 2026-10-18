@@ -262,6 +262,20 @@ test('generic party game server protocol is wired with host lifecycle and privac
   assert.match(server, /clearPartyGame\(room\)/);
 });
 
+test('watch-party navigation keeps discovery, creation, and games focused', () => {
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(client, /entryTab === 'discover'/);
+  assert.match(client, /Public watch parties/);
+  assert.match(client, /entryTab !== 'create'/);
+  assert.match(client, /aria-label="Room workspace"/);
+  assert.match(client, /roomView === 'games'/);
+  assert.match(client, /Room arcade/);
+  assert.match(client, /Access & privacy/);
+  assert.match(client, /Choose a title/);
+  assert.match(client, /aria-label="Playback and session controls"/);
+  assert.match(client, /aria-label="Invite and room controls"/);
+});
+
 test('movie trivia keeps the answer private until reveal and prevents duplicate scoring', () => {
   const game = createMovieTriviaGame([{ question: 'Which is a movie?', options: ['Film', 'Book'], answerIndex: 0 }], 1_000, 20_000);
   game.scores = { Viewer: 0 };
