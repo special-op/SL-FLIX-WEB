@@ -971,7 +971,7 @@ async function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {},
             ...extraHeaders
         },
         timeout: PROXY_TIMEOUT_MS,
-        lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
+        lookup: (_hostname, options, callback) => { const cb = typeof options === 'function' ? options : callback; const opts = typeof options === 'function' ? {} : (options || {}); if (opts.all) return cb(null, [{ address: address.address, family: address.family }]); return cb(null, address.address, address.family); },
         servername: targetHost
     };
     const proxyReq = https.request(options, (proxyRes) => {
