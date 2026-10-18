@@ -16,6 +16,7 @@ import net from 'net';
 import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
 import { getNormalizedChannels } from './server/iptvStorage.js';
+import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
 import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, isCorrectGuess, scoreForCorrectGuess } from './server/watchPartyGame.js';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
@@ -912,6 +913,7 @@ const PROXY_DNS_TIMEOUT_MS = 3000;
 const PROXY_TIMEOUT_MS = 15000;
 const PROXY_RESPONSE_IDLE_TIMEOUT_MS = 30000;
 const MAX_PROXY_RESPONSE_BYTES = 4 * 1024 * 1024;
+const proxyCircuit = createUpstreamCircuitBreaker();
 
 function isAllowedProxyHost(hostname) {
     const host = String(hostname || '').toLowerCase().replace(/\.$/, '');
@@ -950,6 +952,8 @@ async function resolveFixedProxyHost(hostname) {
 
 async function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {}, redirectHop = 0) {
     if (res.headersSent) return;
+    const gate = proxyCircuit.beforeRequest(targetHost, `${targetHost}${targetPath}`);
+    if (!gate.allowed) return res.status(503).json(gate.response);
     if (!isAllowedProxyHost(targetHost)) {
         return res.status(502).json({ code: -1, message: 'Proxy destination is not allowlisted' });
     }
@@ -976,6 +980,11 @@ async function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {},
     };
     const proxyReq = https.request(options, (proxyRes) => {
         if (res.headersSent) return;
+        if (proxyRes.statusCode >= 500) {
+            proxyRes.resume();
+            return res.status(503).json(proxyCircuit.recordFailure(targetHost, `${targetHost}${targetPath}`));
+        }
+        proxyCircuit.recordSuccess(targetHost);
         if (proxyRes.statusCode && proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
             if (redirectHop >= MAX_PROXY_REDIRECTS) {
                 proxyRes.resume();
@@ -1015,12 +1024,12 @@ async function proxyRequest(req, res, targetHost, targetPath, extraHeaders = {},
     proxyReq.on('error', (err) => {
         if (res.headersSent) return;
         console.error(`[PROXY ERROR] ${targetHost}:`, err.message);
-        res.status(502).json({ code: -1, message: `Proxy error: ${err.message}` });
+        res.status(503).json(proxyCircuit.recordFailure(targetHost, `${targetHost}${targetPath}`));
     });
     proxyReq.on('timeout', () => {
         if (res.headersSent) return;
         proxyReq.destroy();
-        res.status(504).json({ code: -1, message: 'Proxy timeout' });
+        res.status(503).json(proxyCircuit.recordFailure(targetHost, `${targetHost}${targetPath}`));
     });
     if (req.body) {
         req.pipe(proxyReq, { end: true });

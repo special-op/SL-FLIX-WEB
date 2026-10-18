@@ -4,6 +4,7 @@ import NodeCache from 'node-cache';
 import crypto from 'crypto';
 import https from 'https';
 import http from 'http';
+import { createUpstreamCircuitBreaker } from './upstreamCircuitBreaker.js';
 import { 
     initIptvStorage, 
     getNormalizedChannels, 
@@ -15,6 +16,7 @@ import {
 } from './iptvStorage.js';
 
 const router = express.Router();
+const stripTrailerPrefix = (value) => String(value || '').replace(/^trailer\s*[-:–—]\s*/i, '').trim();
 // Initialize local JSON storage for IPTV and trigger 2-day auto-sync loop
 try {
     initIptvStorage();
@@ -53,11 +55,22 @@ const baseHeaders = {
     'Origin': 'https://moviebox.ph',
     'Referer': 'https://moviebox.ph/'
 };
-async function fetchExternal(url, options = {}, attempt = 1) {
-    if (attempt > 3) {
-        console.error(`[API] Max retries reached for ${url}`);
-        return { success: false, results: [], error: 'Max retries reached' };
-    }
+const upstreamCircuit = createUpstreamCircuitBreaker();
+const UPSTREAM_ATTEMPTS = 2;
+const UPSTREAM_TIMEOUT_MS = 6000;
+
+function upstreamHost(url) {
+    try { return new URL(url).hostname; } catch { return 'unknown'; }
+}
+
+function isTransientUpstreamFailure(error, status) {
+    return status >= 500 || status === 0 || error?.name === 'AbortError' || /fetch|network|timeout|socket/i.test(error?.message || '');
+}
+
+async function fetchExternal(url, options = {}) {
+    const host = upstreamHost(url);
+    const gate = upstreamCircuit.beforeRequest(host, url);
+    if (!gate.allowed) return gate.response;
     let headers = { ...baseHeaders, ...options.headers };
     if (url.includes('omegatech')) {
         try {
@@ -66,42 +79,27 @@ async function fetchExternal(url, options = {}, attempt = 1) {
             headers['Referer'] = origin + '/';
         } catch (e) {}
     }
-    const delay = Math.min(attempt * 1000, 5000);
-    try {
-        const res = await fetch(url, { 
-            ...options, 
-            headers,
-            signal: AbortSignal.timeout(10000) 
-        });
-        const text = await res.text();
-        let data;
+    for (let attempt = 1; attempt <= UPSTREAM_ATTEMPTS; attempt += 1) {
         try {
-            data = JSON.parse(text);
-        } catch (e) {
-            if (res.ok) {
-                console.warn(`[API] Non-JSON response for ${url}:`, text.substring(0, 100));
-                return { success: false, raw: text, data: {} };
+            const res = await fetch(url, { ...options, headers, signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS) });
+            const text = await res.text();
+            let data;
+            try { data = JSON.parse(text); } catch {
+                if (res.ok) return { success: false, raw: text, data: {} };
+                if (!isTransientUpstreamFailure(null, res.status)) return { success: false, results: [], error: `HTTP ${res.status}` };
+                data = null;
             }
-            throw new Error(`HTTP Error: ${res.status} (Non-JSON response)`);
+            if (res.ok) {
+                upstreamCircuit.recordSuccess(host);
+                return data;
+            }
+            if (!isTransientUpstreamFailure(null, res.status)) return data || { success: false, results: [], error: `HTTP ${res.status}` };
+        } catch (error) {
+            if (!isTransientUpstreamFailure(error, 0)) return { success: false, results: [], error: 'upstream_request_failed' };
         }
-        if (res.ok) {
-            return data;
-        }
-        if (res.status >= 500 || res.status === 0) {
-            console.warn(`[API] ${res.status || 'Timeout'} for ${url}, retry ${attempt}...`);
-            await new Promise(r => setTimeout(r, delay));
-            return fetchExternal(url, options, attempt + 1);
-        }
-        return data;
-    } catch (error) {
-        if (error.name !== 'AbortError' && attempt < 3 && (error.message.includes('503') || error.message.includes('fetch') || error.message.includes('Failed') || error.message.includes('timeout'))) {
-            console.warn(`[API] Error for ${url}: ${error.message}, retry ${attempt}...`);
-            await new Promise(r => setTimeout(r, delay));
-            return fetchExternal(url, options, attempt + 1);
-        }
-        console.warn(`[API] Final fail ${url}:`, error.message);
-        return { success: false, results: [], error: error.message }; 
+        if (attempt < UPSTREAM_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, 150 * attempt));
     }
+    return upstreamCircuit.recordFailure(host, url);
 }
 router.get('/search', async (req, res) => {
     try {
@@ -146,7 +144,7 @@ router.get('/search', async (req, res) => {
                         releaseDate: String(item.releaseDate || ''),
                         genre: item.genre || '',
                         rating: String(item.imdbRatingValue || item.imdbRating || '0'),
-                        description: item.description || '',
+                        description: stripTrailerPrefix(item.description),
                         type: type,
                         detailPath: item.detailPath || '',
                         countryName: item.countryName || '',
@@ -182,7 +180,7 @@ router.get('/search', async (req, res) => {
                     releaseDate: item.releaseDate || item.release_date || item.first_air_date || '',
                     genre: item.genre || '',
                     rating: item.imdbRatingValue || item.vote_average || 0,
-                    description: item.description || item.overview || '',
+                    description: stripTrailerPrefix(item.description || item.overview),
                     type: item.subjectType === 2 ? 'TV Series' : 'Movie'
                 }));
                 const response = {
@@ -266,7 +264,7 @@ router.get('/staff/:staffId', async (req, res) => {
                     releaseDate: String(d.releaseDate || ''),
                     genre: d.genre || '',
                     rating: d.imdbRatingValue || '0',
-                    description: d.description || '',
+                    description: stripTrailerPrefix(d.description),
                     type: type,
                     detailPath: d.detailPath || ''
                 };
@@ -327,7 +325,7 @@ router.get('/movie/:id', async (req, res) => {
         const response = {
             id: String(d.subjectId || d.id || d.mid || id),
             title: d.title || d.name || d.subjectName || "Unknown",
-            description: d.description || d.introduction || d.summary || '',
+            description: stripTrailerPrefix(d.description || d.introduction || d.summary),
             cover: cover,
             backdrop: backdrop,
             releaseDate: String(d.releaseDate || d.release_date || d.year || d.publish_date || ''),
@@ -472,6 +470,9 @@ router.get('/sources/:id', async (req, res) => {
                 }
             }
         }
+        if (data?.error === 'upstream_unavailable') {
+            return res.status(503).json(data);
+        }
         if (data && (data.success || data.statusCode === 200) && (data.qualities || data.subtitles)) {
             const forceHttps = (url) => {
                 if (!url) return url;
@@ -531,10 +532,11 @@ router.get('/sources/:id', async (req, res) => {
                 subtitles: subtitles 
             });
         }
-        res.json({ results: [], subtitles: [] });
+        res.status(502).json({ error: 'sources_unavailable', message: 'Sources are unavailable right now' });
     } catch (error) {
         console.error('[API] Sources error:', error);
-        res.json({ results: [], subtitles: [] });
+        if (error?.error === 'upstream_unavailable') return res.status(503).json(error);
+        res.status(502).json({ error: 'sources_unavailable', message: 'Sources are unavailable right now' });
     }
 });
 router.get('/ranking/:category', async (req, res) => {
