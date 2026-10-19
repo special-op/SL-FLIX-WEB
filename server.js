@@ -17,7 +17,7 @@ import apiRouter from './server/api.js';
 import { renderOgPng } from './server/ogGenerator.js';
 import { getNormalizedChannels } from './server/iptvStorage.js';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
-import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, classifyGuess, nextGuessPosterRound, createMovieTriviaGame, getPublicMovieTriviaGame, scoreTriviaAnswer, cleanupPartyGame, createPartyGame, getPublicPartyGame, nextPartyGameRound, scorePartyGameGuess } from './server/watchPartyGame.js';
+import { allowGuessRate, cleanupGuessPosterGame, createGuessPosterGame, getPublicGuessPosterGame, classifyGuess, nextGuessPosterRound, buildMovieTriviaQuestions as buildTriviaQuestions, createMovieTriviaGame, getPublicMovieTriviaGame, scoreTriviaAnswer, cleanupPartyGame, createPartyGame, getPublicPartyGame, nextPartyGameRound, scorePartyGameGuess } from './server/watchPartyGame.js';
 dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -330,6 +330,8 @@ function isRoomCreationRateLimited(socket) {
 
 function cleanGuessPosterCandidates(value) {
     if (!Array.isArray(value) || value.length === 0 || value.length > GUESS_POSTER_MAX_CANDIDATES) return null;
+    const seenIds = new Set();
+    const seenTitles = new Set();
     const candidates = value.map(candidate => {
         if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
         const id = cleanText(candidate.id, 100);
@@ -351,37 +353,21 @@ function cleanGuessPosterCandidates(value) {
             ...(category ? { category } : {})
         } : null;
     });
-    return candidates.every(Boolean) ? candidates : null;
+    if (!candidates.every(Boolean)) return null;
+    const uniqueCandidates = candidates.filter(candidate => {
+        const titleKey = candidate.title.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
+        if (seenIds.has(candidate.id) || seenTitles.has(titleKey)) return false;
+        seenIds.add(candidate.id);
+        seenTitles.add(titleKey);
+        return true;
+    });
+    return uniqueCandidates.length ? uniqueCandidates : null;
 }
 
+// Keep the server entry point named for older audits and callers while the
+// metadata sanitising/generation lives beside the other game rules.
 function buildMovieTriviaQuestions(payload) {
-    if (Array.isArray(payload?.questions) && payload.questions.length) {
-        return payload.questions.slice(0, MOVIE_TRIVIA_MAX_QUESTIONS);
-    }
-    // Older clients send the poster candidate set instead of question objects.
-    // Turn that set into safe title-choice rounds without trusting client answers.
-    const candidates = cleanGuessPosterCandidates(payload?.candidates) || [];
-    if (!candidates.length) return [];
-    const requestedRounds = Number.isInteger(Number(payload?.maxRounds))
-        ? Math.min(5, Math.max(1, Number(payload.maxRounds)))
-        : Math.min(5, candidates.length);
-    return Array.from({ length: requestedRounds }, (_, index) => {
-        const answer = candidates[index % candidates.length];
-        const distractors = candidates
-            .filter(candidate => candidate.id !== answer.id)
-            .slice(0, 3)
-            .map(candidate => candidate.title);
-        const baseOptions = [answer.title, ...distractors];
-        const shift = baseOptions.length ? index % baseOptions.length : 0;
-        const options = [...baseOptions.slice(shift), ...baseOptions.slice(0, shift)];
-        return {
-            id: `movie-trivia-${index + 1}`,
-            question: `Which title belongs to this watch-party challenge?`,
-            options,
-            answerIndex: options.indexOf(answer.title),
-            category: answer.category || answer.contentType || ''
-        };
-    });
+    return buildTriviaQuestions(payload);
 }
 
 function scheduleGuessPosterRound(roomId) {
@@ -1089,7 +1075,7 @@ io.on('connection', (socket) => {
         }
         const questions = buildMovieTriviaQuestions(payload);
         const game = createMovieTriviaGame(questions, Date.now(), MOVIE_TRIVIA_ROUND_MS);
-        if (!game.questions.length) return socket.emit('error_message', { message: 'Send at least one valid trivia question.' });
+        if (!game.questions.length) return socket.emit('error_message', { message: 'Movie Trivia needs at least two distinct movie candidates or one valid custom question.' });
         game.scores = Object.fromEntries(room.users.slice(0, MOVIE_TRIVIA_MAX_PLAYERS).map(user => [user.name, 0]));
         room.movieTriviaGame = game;
         const event = { game: getPublicMovieTriviaGame(game) };
@@ -1177,7 +1163,16 @@ io.on('connection', (socket) => {
             characters,
             movie: payload.movie && typeof payload.movie === 'object' ? payload.movie : null
         }, Date.now());
-        if (!game.maxRounds) return socket.emit('error_message', { message: 'Send at least one valid movie candidate or character.' });
+        if (!game.maxRounds) {
+            const modeMessage = {
+                quote: 'Quote game needs at least one candidate with a distinct quote or tagline.',
+                character: 'Character game needs at least one distinct character name.',
+                scramble: 'Scramble game needs at least one distinct title with at least two characters.',
+                emoji: 'Emoji game needs at least one distinct movie title.',
+                mixed: 'Mixed game needs at least one usable distinct movie, quote, emoji, or character clue.'
+            }[gameType];
+            return socket.emit('error_message', { message: modeMessage || 'Send at least one valid movie candidate or character.' });
+        }
         game.scores = Object.fromEntries(room.users.slice(0, PARTY_GAME_MAX_PLAYERS).map(user => [user.name, 0]));
         room.partyGame = game;
         const event = { game: getPublicPartyGame(game) };

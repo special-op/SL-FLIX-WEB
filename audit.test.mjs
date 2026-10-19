@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createUpstreamCircuitBreaker } from './server/upstreamCircuitBreaker.js';
 import { classifyNetworkQuality, calculateRetryDelay } from './utils/networkQuality.js';
-import { allowGuessRate, cleanupGuessPosterGame, classifyGuess, createGuessPosterGame, createMovieTriviaGame, createPartyGame, getPublicGuessPosterGame, getPublicMovieTriviaGame, getPublicPartyGame, isCorrectGuess, normalizeGuess, scoreForCorrectGuess, scoreGuess, scorePartyGameGuess, scoreTriviaAnswer } from './server/watchPartyGame.js';
+import { allowGuessRate, buildMovieTriviaQuestions, cleanupGuessPosterGame, classifyGuess, createGuessPosterGame, createMovieTriviaGame, createPartyGame, getPublicGuessPosterGame, getPublicMovieTriviaGame, getPublicPartyGame, isCorrectGuess, nextGuessPosterRound, normalizeGuess, scoreForCorrectGuess, scoreGuess, scorePartyGameGuess, scoreTriviaAnswer } from './server/watchPartyGame.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const classifyGuessForAudit = (guess, candidate) => {
@@ -242,12 +242,92 @@ test('generic party games cover every type and keep answers private until reveal
     assert.ok(getPublicPartyGame(game).answer);
   }
   const mixed = createPartyGame({ gameType: 'mixed', rounds: 10, candidates, characters }, 1000);
-  assert.deepEqual(mixed.rounds.slice(0, 4).map(round => round.roundType), ['emoji', 'quote', 'character', 'scramble']);
-  assert.equal(mixed.maxRounds, 10);
+  assert.deepEqual(mixed.rounds.map(round => round.roundType), ['emoji', 'quote', 'character']);
+  assert.equal(mixed.maxRounds, 3);
+  assert.equal(new Set(mixed.rounds.map(round => normalizeGuess(round.answer))).size, mixed.maxRounds);
   assert.equal('answer' in getPublicPartyGame(mixed), false);
   mixed.scores = { Player: 0 };
   assert.equal(scorePartyGameGuess(mixed, 'Player', 'The Star').points, 5);
   assert.equal(scorePartyGameGuess(mixed, 'Player', 'The Star').duplicate, true);
+});
+
+test('movie trivia generates varied, sanitized rounds with unique answers and options', () => {
+  const candidates = Array.from({ length: 7 }, (_, index) => ({
+    id: `movie-${index + 1}`,
+    title: `Movie ${index + 1}`,
+    genre: `Genre ${index + 1}`,
+    releaseDate: `20${10 + index}-01-01`,
+    type: 'Movie',
+    countryName: `Country ${index + 1}`,
+    cast: [{ name: `Actor ${index + 1}`, character: `Character ${index + 1}` }],
+    description: `Description ${index + 1}`,
+    tagline: `Tagline ${index + 1}`
+  }));
+  const questions = buildMovieTriviaQuestions({ movie: candidates[0], candidates, maxRounds: 7 });
+  assert.equal(questions.length, 7);
+  assert.equal(new Set(questions.map(question => question.id)).size, questions.length);
+  assert.equal(new Set(questions.map(question => question.question)).size, questions.length);
+  assert.equal(new Set(questions.map(question => question.options[question.answerIndex])).size, questions.length);
+  for (const question of questions) {
+    assert.ok(question.options.every(option => typeof option === 'string' && option.trim()));
+    assert.equal(new Set(question.options.map(option => normalizeGuess(option))).size, question.options.length);
+  }
+  const game = createMovieTriviaGame(questions, 1000);
+  const hidden = getPublicMovieTriviaGame(game);
+  assert.equal(hidden.answerIndex, undefined);
+  assert.equal(hidden.correctChoice, undefined);
+  assert.deepEqual(hidden.question.options, game.questions[0].options);
+});
+
+test('movie trivia caps an unusable single-candidate pool instead of inventing rounds', () => {
+  const questions = buildMovieTriviaQuestions({
+    movie: { id: 'only', title: 'Only Movie', genre: 'Drama', description: 'A single candidate.' },
+    candidates: [{ id: 'only', title: 'Only Movie' }],
+    maxRounds: 5
+  });
+  assert.deepEqual(questions, []);
+});
+
+test('guess poster caps rounds and never reuses an answer before exhaustion', () => {
+  const game = createGuessPosterGame([
+    { id: 'one', title: 'One', posterUrl: '/one.jpg' },
+    { id: 'two', title: 'Two', posterUrl: '/two.jpg' },
+    { id: 'two-copy', title: 'Two', posterUrl: '/two-copy.jpg' }
+  ], 1000);
+  assert.equal(game.maxRounds, 2);
+  const next = nextGuessPosterRound(game, 2000);
+  assert.ok(next);
+  assert.equal(next.usedAnswerIds.length, 2);
+  assert.equal(new Set(next.usedAnswerIds).size, 2);
+  assert.equal(nextGuessPosterRound(next, 3000), null);
+});
+
+test('generic party games cap usable unique rounds and character answers use names', () => {
+  const candidates = [
+    { id: 'a', title: 'Same Title', quote: 'Line A', emoji: '⭐' },
+    { id: 'b', title: 'Same Title', quote: 'Line B', emoji: '⭐' },
+    { id: 'c', title: 'Other Title', quote: 'Line C', emoji: '✨' }
+  ];
+  const emoji = createPartyGame({ gameType: 'emoji', rounds: 5, candidates }, 1000);
+  assert.equal(emoji.maxRounds, 2);
+  assert.equal(new Set(emoji.rounds.map(round => normalizeGuess(round.answer))).size, emoji.maxRounds);
+  assert.equal(new Set(emoji.rounds.map(round => round.clue)).size, emoji.maxRounds);
+
+  const character = createPartyGame({
+    gameType: 'character',
+    rounds: 5,
+    candidates: [{ id: 'movie', title: 'The Movie' }],
+    characters: [
+      { id: 'hero', name: 'Hero', title: 'The Movie' },
+      { id: 'villain', character: 'Villain', title: 'The Movie' }
+    ]
+  }, 1000);
+  assert.equal(character.maxRounds, 2);
+  assert.deepEqual(character.rounds.map(round => round.answer), ['Hero', 'Villain']);
+  assert.ok(character.rounds.every(round => round.answer !== 'The Movie'));
+
+  const unavailableQuote = createPartyGame({ gameType: 'quote', rounds: 5, candidates: [{ id: 'x', title: 'No Quote' }] }, 1000);
+  assert.equal(unavailableQuote.maxRounds, 0);
 });
 
 test('generic party game server protocol is wired with host lifecycle and privacy events', () => {

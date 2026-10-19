@@ -134,22 +134,32 @@ function safePosterCandidate(candidate) {
 
 function chooseCandidate(candidates, usedIds = []) {
     const unused = candidates.filter(candidate => !usedIds.includes(candidate.id));
-    const pool = unused.length ? unused : candidates;
-    return pool[Math.floor(Math.random() * pool.length)] || null;
+    return unused[Math.floor(Math.random() * unused.length)] || null;
 }
 
 export function createGuessPosterGame(candidates, now = Date.now(), roundMs = 20_000) {
-    const safeCandidates = (Array.isArray(candidates) ? candidates : []).map(safePosterCandidate).filter(candidate => candidate?.id && candidate.title);
+    const seenIds = new Set();
+    const seenTitles = new Set();
+    const safeCandidates = (Array.isArray(candidates) ? candidates : [])
+        .map(safePosterCandidate)
+        .filter(candidate => {
+            if (!candidate?.id || !candidate.title) return false;
+            const titleKey = normalizeGuess(candidate.title);
+            if (seenIds.has(candidate.id) || !titleKey || seenTitles.has(titleKey)) return false;
+            seenIds.add(candidate.id);
+            seenTitles.add(titleKey);
+            return true;
+        });
     const answer = chooseCandidate(safeCandidates);
-    // A single supplied title is still a valid five-round game; selection falls
-    // back to the candidate pool once every title has appeared.
-    const maxRounds = safeCandidates.length ? 5 : 1;
+    // Every round must have a new answer. The server therefore caps the game at
+    // the number of distinct titles instead of cycling a small client pool.
+    const maxRounds = Math.min(5, safeCandidates.length);
     return {
-        status: 'active',
-        round: 1,
+        status: answer ? 'active' : 'finished',
+        round: answer ? 1 : 0,
         maxRounds,
         startedAt: now,
-        endsAt: now + roundMs,
+        endsAt: answer ? now + roundMs : now,
         candidates: safeCandidates,
         usedAnswerIds: answer ? [answer.id] : [],
         answerId: answer?.id || '',
@@ -171,6 +181,7 @@ export function createGuessPosterGame(candidates, now = Date.now(), roundMs = 20
 export function nextGuessPosterRound(previous, now = Date.now(), roundMs = 20_000) {
     if (!previous || previous.round >= previous.maxRounds) return null;
     const answer = chooseCandidate(previous.candidates || [], previous.usedAnswerIds || []);
+    if (!answer) return null;
     return {
         ...previous,
         status: 'active',
@@ -228,13 +239,233 @@ export function getPublicGuessPosterGame(game) {
     };
 }
 
+const TRIVIA_PROMPT_TYPES = ['genre', 'release', 'type', 'country', 'cast', 'description', 'tagline', 'title'];
+const TRIVIA_PROMPT_VARIANTS = {
+    genre: [
+        'Which title is the {value} genre selection in this watch party?',
+        'From the {value} category entries, which title is correct?'
+    ],
+    release: [
+        'Which title was released in {value}?',
+        'Choose the title associated with the {value} release year.'
+    ],
+    type: [
+        'Which title is classified as a {value}?',
+        'Which title matches the {value} content type?'
+    ],
+    country: [
+        'Which title is associated with the {value} country?',
+        'Choose the title from the {value} country collection.'
+    ],
+    cast: [
+        'Which title features {value}?',
+        'Select the title connected to {value}.'
+    ],
+    description: [
+        'Which title matches this description: "{value}"?',
+        'Choose the title described by: "{value}".'
+    ],
+    tagline: [
+        'Which title uses this tagline: "{value}"?',
+        'Choose the title represented by the tagline "{value}".'
+    ],
+    title: [
+        'Which title belongs to this watch-party clue?',
+        'Choose the title that matches this round.'
+    ]
+};
+
+function triviaList(value, maxItems = 8, maxLength = 120) {
+    const values = Array.isArray(value)
+        ? value
+        : (typeof value === 'string' ? value.split(/[,|/]/) : []);
+    const seen = new Set();
+    return values
+        .map(item => {
+            if (item && typeof item === 'object') return boundedText(item.name || item.title || item.value, maxLength);
+            return boundedText(item, maxLength);
+        })
+        .filter(item => {
+            const key = normalizeGuess(item);
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        })
+        .slice(0, maxItems);
+}
+
+function triviaCastList(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    return value.map(entry => {
+        if (!entry || typeof entry !== 'object') return null;
+        const name = boundedText(entry.name || entry.actor || entry.performer || entry.staffName, 120);
+        const character = boundedText(entry.character || entry.characterName || entry.role, 120);
+        const answer = character || name;
+        const key = normalizeGuess(answer);
+        if (!answer || !key || seen.has(key)) return null;
+        seen.add(key);
+        return { name, character, answer };
+    }).filter(Boolean).slice(0, 12);
+}
+
+function safeTriviaSource(source, index = 0) {
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
+    const title = boundedText(source.title || source.name, 160);
+    if (!title) return null;
+    const id = boundedText(source.id || source.subjectId || source.detailPath || `trivia-candidate-${index + 1}`, 100);
+    const genres = triviaList(source.genre || source.genres || source.category, 8, 80);
+    const countries = triviaList(source.countryName || source.country || source.countries, 6, 80);
+    const releaseDate = boundedText(source.releaseDate || source.release_date || source.publishDate || source.publish_date, 32);
+    const releaseYear = boundedText(source.year, 8) || (releaseDate.match(/\b(?:19|20)\d{2}\b/) || [])[0] || '';
+    const contentType = boundedText(source.contentType || source.mediaType || source.type, 48);
+    const description = boundedText(source.description || source.overview || source.synopsis || source.summary || source.introduction, 360);
+    const tagline = boundedText(source.tagline || source.quote || source.line, 240);
+    const cast = triviaCastList(source.cast || source.characters);
+    return {
+        id: id || `trivia-candidate-${index + 1}`,
+        title,
+        genres,
+        countries,
+        releaseDate,
+        releaseYear,
+        contentType,
+        description,
+        tagline,
+        cast,
+        category: boundedText(source.category || genres[0], 80)
+    };
+}
+
+function mergeTriviaSource(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    return {
+        ...existing,
+        id: existing.id || incoming.id,
+        genres: existing.genres.length ? existing.genres : incoming.genres,
+        countries: existing.countries.length ? existing.countries : incoming.countries,
+        releaseDate: existing.releaseDate || incoming.releaseDate,
+        releaseYear: existing.releaseYear || incoming.releaseYear,
+        contentType: existing.contentType || incoming.contentType,
+        description: existing.description || incoming.description,
+        tagline: existing.tagline || incoming.tagline,
+        cast: existing.cast.length ? existing.cast : incoming.cast,
+        category: existing.category || incoming.category
+    };
+}
+
+function triviaPromptValue(candidate, type) {
+    if (type === 'genre') return candidate.genres[0] || candidate.category;
+    if (type === 'release') return candidate.releaseYear || candidate.releaseDate;
+    if (type === 'type') return candidate.contentType;
+    if (type === 'country') return candidate.countries[0];
+    if (type === 'cast') {
+        const cast = candidate.cast[0];
+        return cast ? (cast.character ? `the character ${cast.character}` : `the performer ${cast.name}`) : '';
+    }
+    if (type === 'description') return candidate.description;
+    if (type === 'tagline') return candidate.tagline;
+    return '';
+}
+
+function availableTriviaPromptTypes(candidate) {
+    return TRIVIA_PROMPT_TYPES.filter(type => type === 'title' || Boolean(triviaPromptValue(candidate, type)));
+}
+
+function triviaQuestionId(type, candidate, index, usedIds) {
+    const base = `${type}-${candidate.id || candidate.title}-${index + 1}`
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 90) || `trivia-${index + 1}`;
+    let id = base;
+    let suffix = 2;
+    while (usedIds.has(id)) id = `${base}-${suffix++}`.slice(0, 100);
+    usedIds.add(id);
+    return id;
+}
+
+function uniqueTriviaOptions(answer, candidates, index) {
+    const values = [answer, ...candidates.map(candidate => candidate.title)];
+    const seen = new Set();
+    const options = values.filter(value => {
+        const clean = boundedText(value, 160);
+        const key = normalizeGuess(clean);
+        if (!clean || !key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).slice(0, 4);
+    if (options.length < 2) return [];
+    const shift = index % options.length;
+    return options.slice(shift).concat(options.slice(0, shift));
+}
+
+/** Build server-owned trivia rounds from safe movie metadata and title choices. */
+export function buildMovieTriviaQuestions(payload = {}) {
+    const input = payload && typeof payload === 'object' ? payload : {};
+    if (Array.isArray(input.questions) && input.questions.length) {
+        return input.questions.slice(0, 20);
+    }
+    const rawSources = [input.movie, ...(Array.isArray(input.candidates) ? input.candidates : [])];
+    const byTitle = new Map();
+    rawSources.forEach((source, index) => {
+        const candidate = safeTriviaSource(source, index);
+        const key = candidate && normalizeGuess(candidate.title);
+        if (!candidate || !key) return;
+        byTitle.set(key, mergeTriviaSource(byTitle.get(key), candidate));
+    });
+    const candidates = Array.from(byTitle.values());
+    if (candidates.length < 2) return [];
+    const requestedValue = Number(input.maxRounds);
+    const requestedRounds = Number.isFinite(requestedValue)
+        ? Math.min(20, Math.max(1, Math.floor(requestedValue)))
+        : Math.min(5, candidates.length);
+    const questions = [];
+    const usedIds = new Set();
+    const usedPrompts = new Set();
+    let promptCursor = 0;
+    for (let index = 0; index < candidates.length && questions.length < requestedRounds; index += 1) {
+        const candidate = candidates[index];
+        const available = availableTriviaPromptTypes(candidate);
+        const preferred = TRIVIA_PROMPT_TYPES.slice(promptCursor).concat(TRIVIA_PROMPT_TYPES.slice(0, promptCursor));
+        const type = preferred.find(value => available.includes(value)) || 'title';
+        promptCursor = (TRIVIA_PROMPT_TYPES.indexOf(type) + 1) % TRIVIA_PROMPT_TYPES.length;
+        const value = triviaPromptValue(candidate, type);
+        const variants = TRIVIA_PROMPT_VARIANTS[type] || TRIVIA_PROMPT_VARIANTS.title;
+        const template = variants[index % variants.length];
+        let question = template.replace('{value}', value);
+        const promptKey = normalizeGuess(question);
+        if (usedPrompts.has(promptKey)) question = `${question} (Clue ${questions.length + 1})`;
+        usedPrompts.add(normalizeGuess(question));
+        const options = uniqueTriviaOptions(candidate.title, candidates, index);
+        if (!options.length) continue;
+        questions.push({
+            id: triviaQuestionId(type, candidate, index, usedIds),
+            question,
+            options,
+            answerIndex: options.findIndex(option => normalizeGuess(option) === normalizeGuess(candidate.title)),
+            category: candidate.genres[0] || candidate.category || candidate.contentType || ''
+        });
+    }
+    return questions;
+}
+
 function safeTriviaQuestion(question, index) {
     if (!question || typeof question !== 'object') return null;
     const prompt = String(question.question ?? question.prompt ?? '').trim().slice(0, 500);
-    const options = Array.isArray(question.options)
+    const rawOptions = Array.isArray(question.options)
         ? question.options.map(option => String(option).trim().slice(0, 160)).filter(Boolean).slice(0, 6)
         : [];
-    const answerIndex = Number.isInteger(question.answerIndex) ? question.answerIndex : options.findIndex(option => normalizeGuess(option) === normalizeGuess(question.answer));
+    const answerValue = Number.isInteger(question.answerIndex) ? rawOptions[question.answerIndex] : question.answer;
+    const seenOptions = new Set();
+    const options = rawOptions.filter(option => {
+        const key = normalizeGuess(option);
+        if (!key || seenOptions.has(key)) return false;
+        seenOptions.add(key);
+        return true;
+    });
+    const answerIndex = options.findIndex(option => normalizeGuess(option) === normalizeGuess(answerValue));
     if (!prompt || options.length < 2 || answerIndex < 0 || answerIndex >= options.length) return null;
     return {
         id: String(question.id || `trivia-${index + 1}`).trim().slice(0, 100),
@@ -247,7 +478,19 @@ function safeTriviaQuestion(question, index) {
 }
 
 export function createMovieTriviaGame(questions, now = Date.now(), roundMs = 20_000) {
-    const safeQuestions = (Array.isArray(questions) ? questions : []).map(safeTriviaQuestion).filter(Boolean).slice(0, 20);
+    const seenIds = new Set();
+    const seenPrompts = new Set();
+    const safeQuestions = (Array.isArray(questions) ? questions : [])
+        .map(safeTriviaQuestion)
+        .filter(question => {
+            if (!question) return false;
+            const promptKey = normalizeGuess(question.question);
+            if (seenIds.has(question.id) || seenPrompts.has(promptKey)) return false;
+            seenIds.add(question.id);
+            seenPrompts.add(promptKey);
+            return true;
+        })
+        .slice(0, 20);
     const first = safeQuestions[0];
     return {
         type: 'movie_trivia',
@@ -356,11 +599,14 @@ function safePartyCandidate(candidate, index = 0) {
 
 function safePartyCharacters(characters, fallbackTitle = '') {
     if (!Array.isArray(characters)) return [];
+    const seenNames = new Set();
     return characters.map((character, index) => {
         if (!character || typeof character !== 'object') return null;
         const name = boundedText(character.character || character.characterName || character.name || character.role, 120);
         const title = boundedText(character.title || character.movieTitle || character.movie?.title || fallbackTitle, 160);
-        if (!name || !title) return null;
+        const nameKey = normalizeGuess(name);
+        if (!name || !nameKey || seenNames.has(nameKey)) return null;
+        seenNames.add(nameKey);
         return {
             id: boundedText(character.id || `party-character-${index + 1}`, 100),
             name,
@@ -385,13 +631,16 @@ const WORD_EMOJI = new Map([
     ['fire', '🔥'], ['water', '💧'], ['heart', '❤️'], ['dragon', '🐉'], ['game', '🎮']
 ]);
 
-function emojiForTitle(title) {
+function emojiForTitle(title, variation = 0) {
     const mapped = titleWords(title).map(word => WORD_EMOJI.get(word)).filter(Boolean);
-    if (mapped.length) return mapped.slice(0, 6).join(' ');
+    if (mapped.length) {
+        const rotated = mapped.slice(variation % mapped.length).concat(mapped.slice(0, variation % mapped.length));
+        return rotated.slice(0, 6).join(' ');
+    }
     // A stable fallback is preferable to accepting arbitrary client markup.
     const symbols = ['🎬', '✨', '🍿', '🎭', '🌟', '🔍'];
     const seed = [...normalizeFullTitle(title)].reduce((sum, char) => sum + char.charCodeAt(0), 0);
-    return `${symbols[seed % symbols.length]} ${symbols[(seed + 2) % symbols.length]}`;
+    return `${symbols[(seed + variation) % symbols.length]} ${symbols[(seed + variation + 2) % symbols.length]}`;
 }
 
 function scrambleTitle(title, seed = 0) {
@@ -415,9 +664,26 @@ function safeRoundMs(value, fallback = 20_000) {
     return Math.min(PARTY_GAME_MAX_ROUND_MS, Math.max(PARTY_GAME_MIN_ROUND_MS, Math.floor(number)));
 }
 
-function partyRoundForType(type, candidate, character, index) {
+function partyClueKey(value) {
+    return boundedText(value, 500).toLocaleLowerCase().replace(/\s+/g, ' ');
+}
+
+function uniquePartyClue(clue, usedClues = new Set()) {
+    const clean = boundedText(clue, 500);
+    if (!clean || !usedClues.has(partyClueKey(clean))) return clean;
+    const suffixes = ['🎬', '✨', '🍿', '🎭', '🌟', '🔍'];
+    for (const suffix of suffixes) {
+        const variant = `${clean} ${suffix}`;
+        if (!usedClues.has(partyClueKey(variant))) return variant;
+    }
+    return `${clean} ${usedClues.size + 1}`;
+}
+
+function partyRoundForType(type, candidate, character, index, usedClues = new Set()) {
     const isCharacterRound = type === 'character' && Boolean(character?.name);
+    if (type === 'character' && !isCharacterRound) return null;
     const answer = isCharacterRound ? character.name : (candidate?.title || '');
+    if (!answer) return null;
     const base = {
         id: `${type}-${index + 1}`,
         roundType: type,
@@ -429,30 +695,41 @@ function partyRoundForType(type, candidate, character, index) {
         contentType: boundedText(character?.contentType || candidate?.contentType, 32)
     };
     if (type === 'emoji') {
-        const clue = candidate?.emoji || emojiForTitle(answer);
-        return { ...base, prompt: 'Guess the movie from these emojis.', clue };
+        const clue = uniquePartyClue(candidate?.emoji || emojiForTitle(answer, index), usedClues);
+        return { ...base, prompt: ['Guess the movie from these emojis.', 'Which title do these symbols describe?', 'Name the movie hidden in this emoji trail.'][index % 3], clue };
     }
     if (type === 'quote') {
-        const clue = candidate?.quote || 'Name the movie this quote comes from.';
-        return { ...base, prompt: 'Which movie is this quote from?', clue };
+        const clue = boundedText(candidate?.quote, 500);
+        if (!clue) return null;
+        return { ...base, prompt: ['Which title is this line from?', 'Name the movie behind this quote.', 'Which watch-party title uses this line?'][index % 3], clue };
     }
     if (type === 'character') {
         return {
             ...base,
-            prompt: 'Who is this character?',
+            prompt: ['Who is this character?', 'Which character is shown here?', 'Name the character from this title.'][index % 3],
             clue: character?.imageUrl ? 'Identify the character from the image.' : `Character from ${character?.title || 'the selected title'}`
         };
     }
-    return { ...base, prompt: 'Unscramble the movie title.', clue: scrambleTitle(answer, index) };
+    if ([...answer].length < 2) return null;
+    return { ...base, prompt: ['Unscramble the movie title.', 'Put this title back in order.', 'Which title is hidden in this scramble?'][index % 3], clue: uniquePartyClue(scrambleTitle(answer, index), usedClues) };
 }
 
 function normalizePartyOptions(options = {}) {
     const movie = safePartyCandidate(options.movie, 0);
+    const seenCandidateTitles = new Set();
     const candidates = (Array.isArray(options.candidates) ? options.candidates : [])
         .slice(0, 50)
         .map((candidate, index) => safePartyCandidate(candidate, index))
-        .filter(Boolean);
-    if (movie && !candidates.some(candidate => normalizeGuess(candidate.title) === normalizeGuess(movie.title))) candidates.unshift(movie);
+        .filter(candidate => {
+            const key = candidate && normalizeGuess(candidate.title);
+            if (!candidate || !key || seenCandidateTitles.has(key)) return false;
+            seenCandidateTitles.add(key);
+            return true;
+        });
+    if (movie && !seenCandidateTitles.has(normalizeGuess(movie.title))) {
+        candidates.unshift(movie);
+        seenCandidateTitles.add(normalizeGuess(movie.title));
+    }
     const characters = safePartyCharacters(
         Array.isArray(options.characters) ? options.characters : (options.movie?.characters || options.movie?.cast),
         movie?.title || ''
@@ -475,13 +752,78 @@ export function createPartyGame(options = {}, now = Date.now()) {
     const sourceCandidates = normalized.candidates;
     const sourceCharacters = normalized.characters;
     const rounds = [];
-    for (let index = 0; index < normalized.rounds; index += 1) {
-        const roundType = normalized.type === 'mixed' ? PARTY_GAME_TYPES[index % PARTY_GAME_TYPES.length] : normalized.type;
-        const candidate = sourceCandidates[index % sourceCandidates.length];
-        const character = sourceCharacters.length ? sourceCharacters[index % sourceCharacters.length] : null;
-        const selectedCandidate = candidate || (character ? safePartyCandidate({ title: character.title, id: character.id, category: character.category, contentType: character.contentType, imageUrl: character.imageUrl }) : null);
-        if (!selectedCandidate) break;
-        rounds.push(partyRoundForType(roundType, selectedCandidate, roundType === 'character' ? character : null, index));
+    const usedCandidateTitles = new Set();
+    const usedCharacterNames = new Set();
+    const usedAnswers = new Set();
+    const usedClues = new Set();
+    let typeCursor = 0;
+
+    const findCandidate = (type) => {
+        for (let offset = 0; offset < sourceCandidates.length; offset += 1) {
+            const candidate = sourceCandidates[(offset + typeCursor) % sourceCandidates.length];
+            const titleKey = normalizeGuess(candidate.title);
+            if (usedCandidateTitles.has(titleKey)) continue;
+            if (type === 'quote' && !candidate.quote) continue;
+            if (type === 'quote' && usedClues.has(partyClueKey(candidate.quote))) continue;
+            if (type === 'scramble' && [...candidate.title].length < 2) continue;
+            if (type === 'scramble' && usedClues.has(partyClueKey(scrambleTitle(candidate.title, rounds.length)))) continue;
+            return candidate;
+        }
+        return null;
+    };
+
+    const findCharacter = () => {
+        const availableCharacters = sourceCharacters.filter(character => (
+            !character.title || !usedCandidateTitles.has(normalizeGuess(character.title))
+        ));
+        const pool = availableCharacters.length ? availableCharacters : sourceCharacters;
+        for (let offset = 0; offset < pool.length; offset += 1) {
+            const character = pool[(offset + typeCursor) % pool.length];
+            const nameKey = normalizeGuess(character.name);
+            if (!nameKey || usedCharacterNames.has(nameKey) || usedAnswers.has(nameKey)) continue;
+            return character;
+        }
+        return null;
+    };
+
+    for (let attempt = 0; attempt < normalized.rounds; attempt += 1) {
+        const typesToTry = normalized.type === 'mixed'
+            ? PARTY_GAME_TYPES.map((_, offset) => PARTY_GAME_TYPES[(typeCursor + offset) % PARTY_GAME_TYPES.length])
+            : [normalized.type];
+        let madeRound = false;
+        for (const roundType of typesToTry) {
+            const character = roundType === 'character' ? findCharacter() : null;
+            const candidate = roundType === 'character' ? null : findCandidate(roundType);
+            if (roundType === 'character' && !character) continue;
+            if (roundType !== 'character' && !candidate) continue;
+            const selectedCandidate = candidate || (character ? safePartyCandidate({
+                title: character.title || 'Character round',
+                id: character.id,
+                category: character.category,
+                contentType: character.contentType,
+                imageUrl: character.imageUrl
+            }) : null);
+            const round = partyRoundForType(roundType, selectedCandidate, character, rounds.length, usedClues);
+            if (!round) continue;
+            const answerKey = normalizeGuess(round.answer);
+            const clueKey = partyClueKey(round.clue);
+            if (!answerKey || usedAnswers.has(answerKey) || (roundType !== 'character' && usedClues.has(clueKey))) continue;
+            rounds.push(round);
+            usedAnswers.add(answerKey);
+            usedClues.add(clueKey);
+            if (roundType === 'character') {
+                usedCharacterNames.add(normalizeGuess(character.name));
+                if (character.title) usedCandidateTitles.add(normalizeGuess(character.title));
+            } else {
+                usedCandidateTitles.add(normalizeGuess(candidate.title));
+            }
+            typeCursor = normalized.type === 'mixed'
+                ? (PARTY_GAME_TYPES.indexOf(roundType) + 1) % PARTY_GAME_TYPES.length
+                : typeCursor;
+            madeRound = true;
+            break;
+        }
+        if (!madeRound) break;
     }
     const effectiveRounds = rounds.length;
     const first = rounds[0];

@@ -1520,7 +1520,7 @@ const App: React.FC = () => {
                     currentView={currentView} 
                     isSearchOpen={isSearchOpen} 
                 />
-                 <main className="flex-1 mobile-content-safe">
+                 <main className={currentView === 'watch-party' ? 'flex-1 min-w-0' : 'flex-1 mobile-content-safe'}>
                     <Suspense fallback={<LoadingView />}>
                         {currentView === 'home' && <HomePage heroMovies={heroMovies} categoriesData={categoriesData} onMovieClick={handleMovieClick} onToplistClick={handleToplistClick} loading={homeLoading} error={homeError} onRetry={retryHome} />}
                         {currentView === 'search' && (
@@ -1604,8 +1604,8 @@ const App: React.FC = () => {
                         )}
                     </Suspense>
                 </main>
-                <Footer />
-                 <div className="fixed bottom-0 left-0 w-full flex justify-center z-50 pointer-events-none px-2 pb-safe lg:hidden">
+                 <Footer />
+                  {currentView !== 'watch-party' && <div className="fixed bottom-0 left-0 w-full flex justify-center z-50 pointer-events-none px-2 pb-safe lg:hidden">
                     <div className="pointer-events-auto">
                         <Dock magnification={50} distance={80} panelHeight={52} className="bg-[#121212]/95 border-white/15 shadow-[0_10px_35px_rgba(0,0,0,0.85)]">
                              <DockItem ariaLabel="Home" onClick={() => { setCurrentView("home"); window.history.pushState({}, "", "/"); resetToHomeSEO(); }}>
@@ -1630,7 +1630,7 @@ const App: React.FC = () => {
                             </DockItem>
                              <DockItem ariaLabel="Watch Party" onClick={() => handleWatchPartyClick()}>
                                 <DockLabel>Watch Party</DockLabel>
-                                <DockIcon><i className={`fa-solid fa-users-viewfinder text-xl ${currentView === "watch-party" ? "text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.8)]" : "text-gray-400"}`}></i></DockIcon>
+                                 <DockIcon><i className="fa-solid fa-users-viewfinder text-xl text-gray-400"></i></DockIcon>
                             </DockItem>
                              <DockItem ariaLabel="Trending" onClick={() => handleTrendingClick()}>
                                 <DockLabel>Trending</DockLabel>
@@ -1645,8 +1645,8 @@ const App: React.FC = () => {
                                 <DockIcon><i className="fa-solid fa-search text-xl text-gray-400"></i></DockIcon>
                             </DockItem>
                         </Dock>
-                    </div>
-                </div>
+                  </div>
+                 </div>}
                 <TelegramModal isOpen={showTelegramModal} onClose={handleCloseTelegramModal} />
             </div>
         </div>
