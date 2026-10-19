@@ -1635,8 +1635,8 @@ export const WatchPartyView: React.FC<{
                       </>
                  ) : (
                     /* INSIDE ACTIVE ROOM: UNIFIED GLOBAL STREAMING PLAYER & REAL-TIME PARTY CONTROLS */
-                    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                        <div className="lg:col-span-3 space-y-4">
+                    <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-4">
+                        <div className="min-w-0 space-y-4 lg:col-span-3">
                             {/* Unified VideoPlayer Component */}
                             {loadingStream ? (
                                 <div className="w-full aspect-video bg-black/90 rounded-2xl border border-white/10 flex flex-col items-center justify-center text-center p-6 shadow-2xl">
@@ -1967,17 +1967,17 @@ export const WatchPartyView: React.FC<{
                                      <button type="button" onClick={() => setRoomView('watch')} className="min-h-10 rounded-xl border border-white/10 bg-white/5 px-3 text-[11px] font-black text-gray-300 hover:bg-white/10 hover:text-white"><i className="fa-solid fa-arrow-left mr-1.5"></i>Back to watch</button>
                                  </div>
                              {/* WAITING-ROOM GAME: GUESS THE POSTER */}
-                             <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-4" aria-labelledby="guess-poster-title">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div>
-                                        <div className="flex items-center gap-2"><span className="rounded-full bg-purple-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-purple-200">Poster quiz</span><span className="text-[10px] text-purple-300/70">5 rounds · 20 sec each</span></div>
-                                        <h2 id="guess-poster-title" className="mt-1 text-sm font-black text-purple-100">Guess the Poster</h2>
-                                        <p className="text-[10px] text-purple-300/80">Exact/full guesses earn <strong className="text-amber-200">5 pts</strong>. Accepted non-full or near guesses earn <strong className="text-cyan-200">3 pts</strong>.</p>
-                                    </div>
-                                    {isCreator && (!guessPosterGame || guessPosterGame.status === 'finished') && (
-                                        <button type="button" onClick={handleStartGuessPoster} disabled={currentRoom.users.length < 2 || getGuessPosterCandidates().length === 0} className="min-h-11 rounded-xl bg-purple-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">Start game</button>
-                                    )}
-                                </div>
+                              <section className="rounded-2xl border border-purple-500/30 bg-purple-950/20 p-5 sm:p-6" aria-labelledby="guess-poster-title">
+                                 <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:gap-6">
+                                     <div className="min-w-0 flex-1">
+                                         <div className="flex items-center gap-2"><span className="rounded-full bg-purple-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-purple-200">Poster quiz</span><span className="text-[10px] text-purple-300/70">5 rounds · 20 sec each</span></div>
+                                         <h2 id="guess-poster-title" className="mt-1 text-sm font-black text-purple-100">Guess the Poster</h2>
+                                         <p className="mb-4 max-w-2xl text-[11px] leading-relaxed text-purple-300/80">Exact/full guesses earn <strong className="text-amber-200">5 pts</strong>. Accepted non-full or near guesses earn <strong className="text-cyan-200">3 pts</strong>. Initials earn 1 point.</p>
+                                     </div>
+                                     {isCreator && (!guessPosterGame || guessPosterGame.status === 'finished') && (
+                                         <button type="button" onClick={handleStartGuessPoster} disabled={currentRoom.users.length < 2 || getGuessPosterCandidates().length === 0} className="min-h-11 shrink-0 rounded-xl bg-purple-400 px-4 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">Start game</button>
+                                     )}
+                                 </div>
                                 {guessPosterGame ? (
                                     <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1.25fr)_minmax(0,.75fr)]">
                                         <div>
@@ -1998,14 +1998,14 @@ export const WatchPartyView: React.FC<{
                                 ) : <p className="mt-3 text-[11px] text-gray-400">Waiting for the host to start a game. At least two members are required.</p>}
                             </section>
                             {/* SECOND WAITING-ROOM GAME: MOVIE TRIVIA */}
-                            <section className="rounded-2xl border border-cyan-500/25 bg-cyan-950/15 p-4" aria-labelledby="movie-trivia-title">
-                                <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div>
-                                        <div className="flex items-center gap-2"><span className="rounded-full bg-cyan-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-200">New game</span><span className="text-[10px] text-cyan-300/70">Timed choices</span></div>
-                                        <h2 id="movie-trivia-title" className="mt-1 text-sm font-black text-cyan-100">Movie Trivia</h2>
-                                        <p className="text-[10px] text-cyan-300/80">Race the room to the right answer, then watch the scoreboard update.</p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
+                             <section className="rounded-2xl border border-cyan-500/25 bg-cyan-950/15 p-5 sm:p-6" aria-labelledby="movie-trivia-title">
+                                 <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:gap-6">
+                                     <div className="min-w-0 flex-1">
+                                         <div className="flex items-center gap-2"><span className="rounded-full bg-cyan-400/15 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-cyan-200">New game</span><span className="text-[10px] text-cyan-300/70">Timed choices</span></div>
+                                         <h2 id="movie-trivia-title" className="mt-1 text-sm font-black text-cyan-100">Movie Trivia</h2>
+                                         <p className="mb-4 max-w-2xl text-[11px] leading-relaxed text-cyan-300/80">Race the room to the right answer, then watch the scoreboard update. Your choice locks for the current round.</p>
+                                     </div>
+                                     <div className="flex shrink-0 flex-wrap items-center gap-2">
                                         {isCreator && triviaGame && <button type="button" onClick={handleEndTrivia} className="min-h-10 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-[11px] font-black text-red-200 hover:bg-red-500 hover:text-white">End game</button>}
                                         {isCreator && (!triviaGame || triviaGame.status === 'finished') && <button type="button" onClick={handleStartTrivia} disabled={isStartingTrivia || currentRoom.users.length < 2} className="min-h-10 rounded-xl bg-cyan-400 px-3 text-[11px] font-black text-black disabled:cursor-not-allowed disabled:opacity-40">{isStartingTrivia ? 'Loading…' : 'Start trivia'}</button>}
                                     </div>
@@ -2029,7 +2029,7 @@ export const WatchPartyView: React.FC<{
                                  </div> : !isStartingTrivia && !triviaError && <div className="mt-3 rounded-xl border border-dashed border-white/10 bg-black/15 px-3 py-5 text-center text-[11px] text-gray-400"><i className="fa-solid fa-circle-question mb-2 text-2xl text-cyan-400/50"></i><p>No trivia round is active.</p><p className="mt-1 text-gray-500">The host can start Movie Trivia when at least two people are in the room.</p></div>}
                              </section>
                              {/* GENERIC PARTY GAME LOBBY & LIVE CARD */}
-                             <section className="overflow-hidden rounded-2xl border border-fuchsia-400/25 bg-[linear-gradient(135deg,rgba(36,20,56,.8),rgba(8,13,27,.95))] p-4 shadow-xl" aria-labelledby="party-game-title">
+                              <section className="overflow-hidden rounded-2xl border border-fuchsia-400/25 bg-[linear-gradient(135deg,rgba(36,20,56,.8),rgba(8,13,27,.95))] p-5 shadow-xl sm:p-6" aria-labelledby="party-game-title">
                                  <div className="flex flex-wrap items-start justify-between gap-3">
                                      <div>
                                          <div className="flex flex-wrap items-center gap-2">
@@ -2037,7 +2037,7 @@ export const WatchPartyView: React.FC<{
                                              <span className="text-[10px] text-fuchsia-200/60">Live socket game</span>
                                          </div>
                                          <h2 id="party-game-title" className="mt-1 text-base font-black text-white">Movie Matchup</h2>
-                                         <p className="mt-1 max-w-xl text-[10px] leading-relaxed text-fuchsia-100/65">A compact five-point race through clues, quotes, characters, and scrambled titles.</p>
+                                          <p className="mb-4 max-w-xl text-[11px] leading-relaxed text-fuchsia-100/65">A compact five-point race through clues, quotes, characters, and scrambled titles.</p>
                                      </div>
                                      {isCreator && partyGame && <button type="button" onClick={handleEndPartyGame} className="min-h-10 rounded-xl border border-red-400/30 bg-red-500/10 px-3 text-[11px] font-black text-red-200 transition-colors hover:bg-red-500 hover:text-white">End game</button>}
                                  </div>
@@ -2141,8 +2141,8 @@ export const WatchPartyView: React.FC<{
                               )}
                            </div>
 
-                        {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
-                         <div className="bg-[#121322] border border-white/10 rounded-3xl p-5 flex flex-col min-h-[420px] h-[min(580px,calc(100dvh-12rem))] lg:h-[580px] shadow-2xl">
+                         {/* ROOM CHAT & PARTICIPANTS SIDEBAR */}
+                          <div className="flex min-h-[420px] min-w-0 h-[min(580px,calc(100dvh-12rem))] flex-col rounded-3xl border border-white/10 bg-[#121322] p-5 shadow-2xl lg:sticky lg:top-6 lg:h-[calc(100dvh-3rem)] lg:max-h-[calc(100dvh-3rem)] lg:self-start">
                             {/* Header with Dual Tabs: Chat & Participants */}
                             <div className="flex items-center justify-between pb-3 border-b border-white/10 mb-3">
                                 <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-2xl border border-white/5">
