@@ -507,6 +507,29 @@ io.on('connection', (socket) => {
         socket.emit('public_rooms_list', rooms);
     });
 
+    // Direct links need a metadata lookup because private rooms are intentionally
+    // excluded from public discovery. This lookup does not join, reserve, or
+    // otherwise change the room; it only returns the same safe public shape used
+    // by discovery plus the current playback position.
+    socket.on('get_room_info', (payload) => {
+        const roomId = validRoomPayload(payload) ? cleanRoomIdValue(payload.roomId) : '';
+        const room = roomId ? watchRooms.get(roomId) : null;
+        if (!room) {
+            return socket.emit('room_info', {
+                roomId,
+                found: false,
+                error: 'ROOM_NOT_FOUND',
+                message: 'Watch party not found or was ended by the host.'
+            });
+        }
+
+        socket.emit('room_info', {
+            found: true,
+            ...publicRoomWithGame(room),
+            currentTime: getRoomCurrentTime(room)
+        });
+    });
+
     socket.on('network_quality_ping', (sentAt, acknowledge) => {
         if (typeof acknowledge === 'function') acknowledge(Number.isFinite(Number(sentAt)) ? Number(sentAt) : Date.now());
     });
@@ -935,6 +958,9 @@ io.on('connection', (socket) => {
         const room = watchRooms.get(cleanRoomId);
         const member = isRoomMember(room, socket);
         if (room && member?.isCreator) {
+            if (action === 'play' && room.users.length < 2) {
+                return socket.emit('error_message', { message: 'Movie playback starts when a second member joins the room.' });
+            }
             const now = Date.now();
             if (currentTime !== undefined && Number.isFinite(Number(currentTime)) && Number(currentTime) >= 0 && Number(currentTime) <= 86400) {
                 room.currentTime = Number(currentTime);

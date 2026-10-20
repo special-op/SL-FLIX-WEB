@@ -109,7 +109,7 @@ test('watch-party room creation and join requests are idempotent with scoped ent
   assert.match(client, /Join by code/);
   assert.match(client, /setTargetRoomId\(cleanId\)/);
   assert.match(client, /'Submitted'/);
-  assert.match(client, /disabled=\{requestInFlight \|\| !socket\}/);
+  assert.match(client, /disabled=\{requestInFlight \|\| targetRoomMissing \|\| !socket\}/);
 });
 
 test('movie search ranks exact and near-exact titles before unrelated results', () => {
@@ -205,6 +205,31 @@ test('watch-party public discovery, privacy, games, and scoring rules are covere
   assert.match(client, /entryTab === 'discover'/);
   assert.match(client, /posterCandidatePool/);
   assert.match(client, /Movie Trivia/);
+});
+
+test('watch-party direct-link room info is public-only and does not alter discovery', () => {
+  const server = read('./server.js');
+  assert.match(server, /socket\.on\('get_room_info', \(payload\) =>/);
+  assert.match(server, /socket\.emit\('room_info'/);
+  assert.match(server, /found: true/);
+  assert.match(server, /\.\.\.publicRoomWithGame\(room\)/);
+  assert.match(server, /currentTime: getRoomCurrentTime\(room\)/);
+  assert.match(server, /found: false/);
+  assert.match(server, /error: 'ROOM_NOT_FOUND'/);
+  assert.match(server, /\.filter\(r => r\.privacy !== 'private'\)/);
+  assert.match(server, /const \{ guessPosterGame, movieTriviaGame, partyGame, reconnectGrace, hostToken, pendingRequests, \.\.\.publicRoom \} = room/);
+});
+
+test('watch-party demo flow resolves metadata before joining and gates movie playback', () => {
+  const server = read('./server.js');
+  const client = read('./components/WatchPartyView.tsx');
+  assert.match(client, /s\.emit\('get_room_info', \{ roomId: cleanParam \}\)/);
+  assert.match(client, /const targetRoom = roomInfo\?\.roomId === targetRoomId \? roomInfo : discoveredRoom/);
+  assert.match(client, /WATCH_PARTY_DEMO_MODE = true/);
+  assert.match(client, /Coming soon/);
+  assert.match(client, /currentRoom\.users\.length >= 2/);
+  assert.match(client, /Watch trailer/);
+  assert.match(server, /action === 'play' && room\.users\.length < 2/);
 });
 
 test('guess poster awards five for full title and three for accepted non-full answers', () => {

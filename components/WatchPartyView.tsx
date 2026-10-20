@@ -3,6 +3,7 @@ import { io as socketIoClient } from 'socket.io-client';
 import { ApiService } from '../services/api';
 import { MovieResult, VideoSource, Subtitle, Season } from '../types';
 import VideoPlayer from './VideoPlayer';
+import { TrailerPlayer } from './VideoPlayer/TrailerPlayer';
 import { getOptimizedImageUrl } from '../utils/image';
 import { useNetworkQuality } from '../hooks/useNetworkQuality';
 
@@ -12,6 +13,8 @@ const getEntryModeLabel = (entryMode: RoomEntryMode = 'manual') => (
     entryMode === 'auto' ? 'Auto-Enter' : 'Manual Approval'
 );
 const WATCH_PARTY_FALLBACK = '/icons/slflix.png';
+// Temporary recording demo: set false to restore normal movie playback after recording.
+const WATCH_PARTY_DEMO_MODE = true;
 const normalizeRoomId = (value: unknown) => {
     const roomId = String(value || '').trim().toUpperCase();
     return /^[A-Z0-9_-]{1,64}$/.test(roomId) ? roomId : '';
@@ -68,6 +71,8 @@ interface WatchRoom {
     /** Optional fields keep the UI compatible with older watch-party servers. */
     isPublic?: boolean;
     public?: boolean;
+    isPrivate?: boolean;
+    privacy?: 'public' | 'private';
     visibility?: 'public' | 'private';
     hostToken?: string;
     waitExpiresAt?: number | null;
@@ -77,6 +82,16 @@ interface WatchRoom {
     guessPosterGame?: GuessPosterGame | null;
     triviaGame?: MovieTriviaGame | null;
     partyGame?: PartyGame | null;
+}
+
+type RoomLookupState = 'idle' | 'loading' | 'resolved' | 'not_found';
+
+interface RoomInfoPayload extends Partial<WatchRoom> {
+    roomId: string;
+    found?: boolean;
+    error?: string;
+    message?: string;
+    currentTime?: number;
 }
 
 interface GuessPosterGame {
@@ -157,6 +172,8 @@ export const WatchPartyView: React.FC<{
             return null;
         }
     });
+    const [roomLookupState, setRoomLookupState] = useState<RoomLookupState>(() => targetRoomId ? 'loading' : 'idle');
+    const [roomInfo, setRoomInfo] = useState<WatchRoom | null>(null);
     const [joinCodeInput, setJoinCodeInput] = useState(() => targetRoomId || '');
     const [entryTab, setEntryTab] = useState<'create' | 'discover' | 'join'>(() => targetRoomId ? 'join' : 'discover');
     const [isCreatingRoom, setIsCreatingRoom] = useState(false);
@@ -191,6 +208,8 @@ export const WatchPartyView: React.FC<{
     const usernameRef = useRef<string>(username);
     const createRequestIdRef = useRef<string | null>(null);
     const createInFlightRef = useRef(false);
+    const roomLookupRoomIdRef = useRef<string | null>(targetRoomId);
+    const autoReconnectRoomRef = useRef<string | null>(null);
 
     useEffect(() => {
         currentRoomRef.current = currentRoom;
@@ -226,6 +245,7 @@ export const WatchPartyView: React.FC<{
     const [subtitles, setSubtitles] = useState<Subtitle[]>([]);
     const [loadingStream, setLoadingStream] = useState<boolean>(false);
     const [streamError, setStreamError] = useState<string | null>(null);
+    const [watchExperience, setWatchExperience] = useState<'movie' | 'trailer'>('movie');
     const [guessPosterGame, setGuessPosterGame] = useState<GuessPosterGame | null>(null);
     const [guessPosterHistory, setGuessPosterHistory] = useState<GuessPosterGame[]>([]);
     const [guessInput, setGuessInput] = useState('');
@@ -284,6 +304,48 @@ export const WatchPartyView: React.FC<{
 
         s.on('active_rooms_list', (rooms: WatchRoom[]) => {
             setActiveRooms(rooms);
+        });
+
+        s.on('room_info', (data: RoomInfoPayload) => {
+            const roomId = normalizeRoomId(data?.roomId);
+            if (!roomId || roomId !== roomLookupRoomIdRef.current) return;
+
+            if (data.found === false) {
+                setRoomLookupState('not_found');
+                setRoomInfo(null);
+                setJoinRequestRoomId(null);
+                setJoinRequestState('idle');
+                autoReconnectRoomRef.current = null;
+                return;
+            }
+
+            const resolvedRoom = data as WatchRoom;
+            setRoomInfo(resolvedRoom);
+            setRoomLookupState('resolved');
+
+            const storedHostToken = (() => {
+                try {
+                    return localStorage.getItem(`slflix_host_token_${roomId}`) || '';
+                } catch {
+                    return '';
+                }
+            })();
+            const shouldReconnect = autoReconnectRoomRef.current === roomId && Boolean(storedHostToken);
+            autoReconnectRoomRef.current = null;
+
+            // A stored host token is the only case where a direct link may reconnect
+            // automatically. Normal guests must review the room before joining.
+            if (shouldReconnect) {
+                setJoinRequestRoomId(roomId);
+                setJoinRequestState('submitting');
+                s.emit('join_room', {
+                    roomId,
+                    username: usernameRef.current,
+                    reconnect: true,
+                    hostToken: storedHostToken
+                });
+                return;
+            }
         });
 
          s.on('room_state', (room: WatchRoom) => {
@@ -396,6 +458,11 @@ export const WatchPartyView: React.FC<{
         s.on('room_user_left', (data: { username: string; usersCount: number; users?: any[] }) => {
             if (data.users) {
                 setCurrentRoom(prev => prev ? { ...prev, users: data.users || prev.users } : null);
+            }
+            if (data.usersCount < 2 || (data.users && data.users.length < 2)) {
+                setSources([]);
+                setSubtitles([]);
+                setLoadingStream(false);
             }
         });
 
@@ -641,28 +708,29 @@ export const WatchPartyView: React.FC<{
             setTimeout(() => setInStreamLatestChat(null), 5000);
         });
 
-        const params = new URLSearchParams(window.location.search);
-         const roomParam = params.get('room');
-         const requestParam = params.get('request') === '1';
+         const roomParam = new URLSearchParams(window.location.search).get('room');
          if (roomParam) {
-             setTimeout(() => {
-                 const storedName = localStorage.getItem('slflix_username') || username;
+             window.setTimeout(() => {
                  const cleanParam = normalizeRoomId(roomParam);
                  if (!cleanParam) return;
                  setTargetRoomId(cleanParam);
                  setJoinCodeInput(cleanParam);
                  setEntryTab('join');
-                 setJoinRequestRoomId(cleanParam);
-                 setJoinRequestState('submitting');
-                 s.emit('join_room', {
-                    roomId: cleanParam,
-                    username: storedName,
-                    reconnect: true,
-                    request: requestParam,
-                    hostToken: localStorage.getItem(`slflix_host_token_${cleanParam}`) || undefined
-                });
-            }, 600);
-        }
+                 setJoinRequestRoomId(null);
+                 setJoinRequestState('idle');
+                 setRoomLookupState('loading');
+                 setRoomInfo(null);
+                 roomLookupRoomIdRef.current = cleanParam;
+                 try {
+                     autoReconnectRoomRef.current = localStorage.getItem(`slflix_host_token_${cleanParam}`)
+                         ? cleanParam
+                         : null;
+                 } catch {
+                     autoReconnectRoomRef.current = null;
+                 }
+                 s.emit('get_room_info', { roomId: cleanParam });
+             }, 600);
+         }
 
         return () => {
             s.disconnect();
@@ -676,10 +744,37 @@ export const WatchPartyView: React.FC<{
 
     const isCreator = Boolean(currentRoom && socket?.id && currentRoom.users.find(u => u.id === socket.id)?.isCreator);
     const isRoomPublic = (room: WatchRoom) => room.isPublic ?? room.public ?? room.visibility !== 'private';
+    const hasSecondMember = Boolean(currentRoom && currentRoom.users.length >= 2);
+    const playbackMovieKey = currentRoom
+        ? `${currentRoom.roomId}:${selectedMovie?.subjectId || selectedMovie?.detailPath || selectedMovie?.title || currentRoom.movie?.subjectId || currentRoom.movie?.detailPath || currentRoom.movie?.title || ''}`
+        : '';
+    const trailerUrl = selectedMovie?.trailerUrl
+        || movieDetails?.trailerUrl
+        || movieDetails?.trailer?.videoAddress?.url
+        || currentRoom?.movie?.trailerUrl
+        || '';
+    const trailerSources: VideoSource[] = trailerUrl
+        ? [{ quality: 720, stream: trailerUrl, label: 'Trailer', type: 'mp4' }]
+        : [];
+
+    useEffect(() => {
+        setWatchExperience('movie');
+        setSources([]);
+        setSubtitles([]);
+        setStreamError(null);
+        setLoadingStream(false);
+        setMovieDetails(null);
+    }, [playbackMovieKey]);
 
     // Load sources when selected movie / episode changes
     useEffect(() => {
-        if (!selectedMovie) return;
+        if (!selectedMovie || !currentRoom || !hasSecondMember || watchExperience !== 'movie' || WATCH_PARTY_DEMO_MODE) {
+            setLoadingStream(false);
+            setSources([]);
+            setSubtitles([]);
+            setStreamError(null);
+            return;
+        }
         let isMounted = true;
         const loadMovieStreams = async () => {
             setLoadingStream(true);
@@ -714,7 +809,7 @@ export const WatchPartyView: React.FC<{
         };
         loadMovieStreams();
         return () => { isMounted = false; };
-    }, [selectedMovie, selectedSeason, selectedEpisode]);
+    }, [selectedMovie, selectedSeason, selectedEpisode, currentRoom?.roomId, currentRoom?.users.length, watchExperience]);
 
     const handleRetryStream = () => {
         setStreamError(null);
@@ -783,6 +878,11 @@ export const WatchPartyView: React.FC<{
     // Master Host / Viewer Action Handler
     const handleHostAction = useCallback((action: 'play' | 'pause' | 'seek', time: number) => {
         if (!socket || !currentRoom) return;
+        if (action === 'play' && currentRoom.users.length < 2) {
+            setPauseNotice('Movie playback starts when a second member joins the room.');
+            window.setTimeout(() => setPauseNotice(null), 3000);
+            return;
+        }
         const isPaused = action === 'pause';
         socket.emit('room_action', {
             roomId: currentRoom.roomId,
@@ -969,6 +1069,24 @@ export const WatchPartyView: React.FC<{
         window.history.pushState({}, '', `/watch-party?room=${cleanId}&request=1`);
     };
 
+    const lookupRoom = (roomId: string) => {
+        if (!socket) return;
+        if (!socket.connected) socket.connect();
+        const cleanId = normalizeRoomId(roomId);
+        if (!cleanId) return;
+        setTargetRoomId(cleanId);
+        setJoinCodeInput(cleanId);
+        setEntryTab('join');
+        setJoinRequestRoomId(null);
+        setJoinRequestState('idle');
+        setRoomLookupState('loading');
+        setRoomInfo(null);
+        roomLookupRoomIdRef.current = cleanId;
+        autoReconnectRoomRef.current = null;
+        socket.emit('get_room_info', { roomId: cleanId });
+        window.history.pushState({}, '', `/watch-party?room=${cleanId}`);
+    };
+
     const handleJoinByCode = (e: React.FormEvent) => {
         e.preventDefault();
         const cleanId = normalizeRoomId(joinCodeInput);
@@ -976,7 +1094,18 @@ export const WatchPartyView: React.FC<{
             setPauseNotice('Enter a valid watch-party code.');
             return;
         }
-        handleJoinRoom(cleanId);
+        const resolvedTarget = roomInfo?.roomId === cleanId && roomLookupState === 'resolved'
+            ? roomInfo
+            : null;
+        if (resolvedTarget) {
+            if (isRoomPublic(resolvedTarget) && resolvedTarget.entryMode === 'auto') {
+                handleJoinRoom(cleanId);
+            } else {
+                handleRequestRoom(cleanId);
+            }
+            return;
+        }
+        lookupRoom(cleanId);
     };
 
     const handleEntryModeChange = (entryMode: RoomEntryMode) => {
@@ -1317,7 +1446,7 @@ export const WatchPartyView: React.FC<{
                                  type="button"
                                  role="tab"
                                  aria-selected={entryTab === 'create'}
-                                 onClick={() => { setEntryTab('create'); setTargetRoomId(null); setJoinRequestRoomId(null); setJoinRequestState('idle'); window.history.pushState({}, '', '/watch-party'); }}
+                                  onClick={() => { setEntryTab('create'); setTargetRoomId(null); setRoomInfo(null); setRoomLookupState('idle'); setJoinRequestRoomId(null); setJoinRequestState('idle'); window.history.pushState({}, '', '/watch-party'); }}
                                  className={`min-h-10 rounded-lg px-3 text-xs font-black transition-colors ${entryTab === 'create' ? 'bg-cyan-500 text-black' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}
                              >
                                  <i className="fa-solid fa-circle-plus mr-1.5"></i>Create party
@@ -1326,7 +1455,7 @@ export const WatchPartyView: React.FC<{
                                   type="button"
                                   role="tab"
                                   aria-selected={entryTab === 'discover'}
-                                  onClick={() => { setEntryTab('discover'); setTargetRoomId(null); setJoinRequestRoomId(null); setJoinRequestState('idle'); window.history.pushState({}, '', '/watch-party'); }}
+                                    onClick={() => { setEntryTab('discover'); setTargetRoomId(null); setRoomInfo(null); setRoomLookupState('idle'); setJoinRequestRoomId(null); setJoinRequestState('idle'); window.history.pushState({}, '', '/watch-party'); }}
                                   className={`min-h-10 rounded-lg px-3 text-xs font-black transition-colors ${entryTab === 'discover' ? 'bg-cyan-500 text-black' : 'text-gray-400 hover:bg-white/10 hover:text-white'}`}
                               >
                                   <i className="fa-solid fa-compass mr-1.5"></i>Discover
@@ -1359,38 +1488,42 @@ export const WatchPartyView: React.FC<{
                      </div>
                        {entryTab !== 'create' ? (
                          targetRoomId ? (
-                             <div className="mx-auto max-w-2xl rounded-3xl border border-cyan-500/30 bg-[#121322] p-5 shadow-2xl sm:p-7">
-                                 {(() => {
-                                       const targetRoom = activeRooms.find(room => room.roomId === targetRoomId);
-                                       const targetEntryMode = targetRoom?.entryMode || 'manual';
-                                       const targetRoomResolved = Boolean(targetRoom);
-                                       const requestInFlight = !targetRoomResolved || (joinRequestRoomId === targetRoomId && (joinRequestState === 'pending' || joinRequestState === 'submitting'));
-                                      return (
-                                         <>
-                                             <div className="flex flex-wrap items-start justify-between gap-3">
-                                                 <div>
-                                                     <p className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Selected watch party</p>
-                                                     <h2 className="mt-1 text-xl font-black text-white">{targetRoom?.roomName || `Room #${targetRoomId}`}</h2>
-                                                     <p className="mt-1 text-xs text-gray-400">Code <span className="font-mono font-bold text-cyan-300">#{targetRoomId}</span>{targetRoom ? ` · Host: ${targetRoom.creator}` : ''}</p>
-                                                 </div>
-                                                  {targetRoomResolved ? <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-[10px] font-black text-emerald-300">{getEntryModeLabel(targetEntryMode)}</span> : <span className="rounded-full bg-amber-500/15 px-2.5 py-1 text-[10px] font-black text-amber-200" role="status"><i className="fa-solid fa-rotate animate-spin mr-1.5" aria-hidden="true"></i>Looking up room…</span>}
-                                             </div>
-                                             <form onSubmit={handleJoinByCode} className="mt-5 flex gap-2">
+                              <div className="mx-auto max-w-2xl rounded-3xl border border-cyan-500/30 bg-[#121322] p-5 shadow-2xl sm:p-7">
+                                  {(() => {
+                                        const discoveredRoom = activeRooms.find(room => room.roomId === targetRoomId) || null;
+                                        const targetRoom = roomInfo?.roomId === targetRoomId ? roomInfo : discoveredRoom;
+                                        const targetEntryMode = targetRoom?.entryMode || 'manual';
+                                        const targetRoomResolved = Boolean(targetRoom);
+                                        const targetRoomMissing = roomLookupState === 'not_found';
+                                        const targetIsPublic = targetRoom ? isRoomPublic(targetRoom) : false;
+                                        const targetRequiresRequest = Boolean(targetRoom && (!targetIsPublic || targetEntryMode !== 'auto'));
+                                        const requestInFlight = !targetRoomResolved || (joinRequestRoomId === targetRoomId && (joinRequestState === 'pending' || joinRequestState === 'submitting'));
+                                       return (
+                                          <>
+                                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                                  <div>
+                                                      <p className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Selected watch party</p>
+                                                      <h2 className="mt-1 text-xl font-black text-white">{targetRoom?.roomName || `Room #${targetRoomId}`}</h2>
+                                                      <p className="mt-1 text-xs text-gray-400">Code <span className="font-mono font-bold text-cyan-300">#{targetRoomId}</span>{targetRoom ? ` · Host: ${targetRoom.creator}` : ''}</p>
+                                                  </div>
+                                                   {targetRoomResolved ? <span className="rounded-full bg-emerald-500/15 px-2.5 py-1 text-[10px] font-black text-emerald-300">{targetIsPublic ? 'Public room' : 'Private room'}</span> : targetRoomMissing ? <span className="rounded-full bg-red-500/15 px-2.5 py-1 text-[10px] font-black text-red-200">Room unavailable</span> : <span className="rounded-full bg-amber-500/15 px-2.5 py-1 text-[10px] font-black text-amber-200" role="status"><i className="fa-solid fa-rotate animate-spin mr-1.5" aria-hidden="true"></i>Looking up room…</span>}
+                                              </div>
+                                              <form onSubmit={handleJoinByCode} className="mt-5 flex gap-2">
                                                  <label htmlFor="selected-watch-party-code" className="sr-only">Join watch party by code</label>
                                                  <input
                                                      id="selected-watch-party-code"
                                                      value={joinCodeInput}
                                                      onChange={e => setJoinCodeInput(e.target.value.toUpperCase())}
-                                                     maxLength={64}
-                                                     className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/30 px-3 text-xs font-mono font-bold uppercase text-white outline-none focus:border-cyan-400"
-                                                 />
-                                                   <button type="submit" disabled={requestInFlight || !socket} className="min-h-11 rounded-xl bg-cyan-500 px-4 text-xs font-black text-black transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50">
-                                                      {!targetRoomResolved ? 'Looking up room…' : joinRequestState === 'pending' && joinRequestRoomId === targetRoomId ? 'Submitted' : joinRequestState === 'submitting' && joinRequestRoomId === targetRoomId ? 'Joining…' : targetEntryMode === 'manual' ? 'Request to join' : 'Join now'}
-                                                  </button>
-                                              </form>
-                                              <p className="mt-3 text-[11px] text-gray-400">
-                                                  {targetRoomResolved ? (targetEntryMode === 'manual' ? 'This room uses manual approval. Your request will stay attached to this room.' : 'You will enter this room immediately.') : 'Looking up room… The join action will appear after the room details are resolved.'}
-                                              </p>
+                                                      maxLength={64}
+                                                      className="min-h-11 min-w-0 flex-1 rounded-xl border border-white/10 bg-black/30 px-3 text-xs font-mono font-bold uppercase text-white outline-none focus:border-cyan-400"
+                                                  />
+                                                    <button type="submit" disabled={requestInFlight || targetRoomMissing || !socket} className="min-h-11 rounded-xl bg-cyan-500 px-4 text-xs font-black text-black transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50">
+                                                       {!targetRoomResolved ? targetRoomMissing ? 'Unavailable' : 'Looking up room…' : joinRequestState === 'pending' && joinRequestRoomId === targetRoomId ? 'Submitted' : joinRequestState === 'submitting' && joinRequestRoomId === targetRoomId ? 'Joining…' : targetRequiresRequest ? 'Request to join' : 'Join room'}
+                                                   </button>
+                                               </form>
+                                               <p className="mt-3 text-[11px] text-gray-400">
+                                                   {targetRoomResolved ? (targetRequiresRequest ? 'This room uses manual approval or private access. Your request will stay attached to this room.' : 'This public room will open immediately.') : targetRoomMissing ? 'This room is no longer available. Ask the host for a new invite code.' : 'Looking up room… The join action will appear after the room details are resolved.'}
+                                               </p>
                                          </>
                                      );
                                  })()}
@@ -1692,12 +1825,59 @@ export const WatchPartyView: React.FC<{
                          </div>
                      )}
                      <div className="watch-party-main-grid grid min-w-0 grid-cols-1 items-start gap-6 lg:grid-cols-4">
-                         <div className="watch-party-player min-w-0 space-y-4 overflow-hidden lg:col-span-3">
-                            {/* Unified VideoPlayer Component */}
-                            {loadingStream ? (
-                                <div className="w-full aspect-video bg-black/90 rounded-2xl border border-white/10 flex flex-col items-center justify-center text-center p-6 shadow-2xl">
-                                    <div className="w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin mb-4"></div>
-                                    <p className="text-sm font-bold text-white">Connecting Global Stream...</p>
+                          <div className="watch-party-player min-w-0 space-y-4 overflow-hidden lg:col-span-3">
+                             <div className="rounded-2xl border border-cyan-500/20 bg-[#121324] p-4 shadow-xl sm:p-5">
+                                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                     <div>
+                                         <p className="text-[10px] font-black uppercase tracking-[0.2em] text-cyan-300">Choose your watch experience</p>
+                                         <p className="mt-1 text-xs text-gray-400">The trailer is available while you wait. Movie playback starts only after another member joins.</p>
+                                     </div>
+                                     <div className="flex flex-wrap gap-2" role="group" aria-label="Watch options">
+                                         <button
+                                             type="button"
+                                             onClick={() => setWatchExperience('movie')}
+                                             disabled={!hasSecondMember}
+                                             className={`min-h-10 rounded-xl px-3 text-xs font-black transition-colors ${watchExperience === 'movie' ? 'bg-cyan-400 text-black' : 'border border-white/10 bg-white/5 text-gray-200 hover:bg-white/10'} disabled:cursor-not-allowed disabled:opacity-45`}
+                                         >
+                                             <i className="fa-solid fa-film mr-1.5" aria-hidden="true"></i>Watch movie
+                                         </button>
+                                         <button
+                                             type="button"
+                                             onClick={() => setWatchExperience('trailer')}
+                                             disabled={trailerSources.length === 0}
+                                             className={`min-h-10 rounded-xl px-3 text-xs font-black transition-colors ${watchExperience === 'trailer' ? 'bg-white text-black' : 'border border-white/10 bg-white/5 text-gray-200 hover:bg-white/10'} disabled:cursor-not-allowed disabled:opacity-45`}
+                                         >
+                                             <i className="fa-solid fa-play mr-1.5" aria-hidden="true"></i>Watch trailer
+                                         </button>
+                                     </div>
+                                 </div>
+                             </div>
+
+                             {/* Unified VideoPlayer Component */}
+                             {watchExperience === 'trailer' ? (
+                                 <div className="flex aspect-video w-full flex-col items-center justify-center rounded-2xl border border-white/10 bg-[#121324] p-6 text-center shadow-2xl">
+                                     <i className="fa-brands fa-youtube mb-3 text-4xl text-red-400" aria-hidden="true"></i>
+                                     <p className="text-sm font-bold text-white">Trailer ready</p>
+                                     <p className="mt-1 max-w-md text-xs text-gray-400">Use the trailer player to watch this title without starting the shared movie stream.</p>
+                                     <button type="button" onClick={() => setWatchExperience('movie')} className="mt-4 min-h-11 rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-xs font-bold text-white hover:bg-white/20">Back to watch options</button>
+                                 </div>
+                             ) : !hasSecondMember ? (
+                                 <div className="flex aspect-video w-full flex-col items-center justify-center rounded-2xl border border-amber-500/30 bg-[#121324] p-6 text-center shadow-2xl">
+                                     <i className="fa-solid fa-user-plus mb-3 text-4xl text-amber-300" aria-hidden="true"></i>
+                                     <p className="text-sm font-bold text-white">Waiting for another member</p>
+                                     <p className="mt-1 max-w-md text-xs text-gray-400">Movie playback is locked until at least two people are in the room. You can still watch the trailer while you wait.</p>
+                                 </div>
+                             ) : WATCH_PARTY_DEMO_MODE ? (
+                                 <div className="flex aspect-video w-full flex-col items-center justify-center rounded-2xl border border-cyan-500/30 bg-[radial-gradient(circle_at_50%_0%,rgba(34,211,238,.2),transparent_58%),#121324] p-6 text-center shadow-2xl">
+                                     <i className="fa-solid fa-clapperboard mb-3 text-4xl text-cyan-300" aria-hidden="true"></i>
+                                     <p className="text-2xl font-black tracking-tight text-white">Coming soon</p>
+                                     <p className="mt-2 max-w-md text-xs leading-relaxed text-gray-300">Movie playback is paused for this demo recording. The room is ready, and the shared stream can be restored by setting <code className="rounded bg-black/30 px-1.5 py-0.5 text-cyan-200">WATCH_PARTY_DEMO_MODE</code> to <code className="rounded bg-black/30 px-1.5 py-0.5 text-cyan-200">false</code>.</p>
+                                     {trailerSources.length > 0 && <button type="button" onClick={() => setWatchExperience('trailer')} className="mt-4 min-h-11 rounded-xl bg-white px-4 py-2 text-xs font-black text-black hover:bg-gray-200">Watch the trailer instead</button>}
+                                 </div>
+                             ) : loadingStream ? (
+                                 <div className="w-full aspect-video bg-black/90 rounded-2xl border border-white/10 flex flex-col items-center justify-center text-center p-6 shadow-2xl">
+                                     <div className="w-12 h-12 border-4 border-cyan-400 border-t-transparent rounded-full animate-spin mb-4"></div>
+                                     <p className="text-sm font-bold text-white">Connecting Global Stream...</p>
                                     <p className="text-xs text-gray-400 mt-1">Synchronizing room audio & video tracks</p>
                                 </div>
                             ) : streamError ? (
@@ -1757,12 +1937,20 @@ export const WatchPartyView: React.FC<{
                             ) : (
                                 <div className="w-full aspect-video bg-[#121324] rounded-2xl border border-white/10 flex flex-col items-center justify-center p-6 text-center shadow-2xl">
                                     <i className="fa-solid fa-circle-exclamation text-amber-400 text-4xl mb-3"></i>
-                                    <p className="text-sm font-bold text-white">Stream Sources Loading...</p>
-                                    <p className="text-xs text-gray-400 mt-1">Please select another title or wait a moment.</p>
-                                </div>
-                            )}
+                                     <p className="text-sm font-bold text-white">Stream Sources Loading...</p>
+                                     <p className="text-xs text-gray-400 mt-1">Please select another title or wait a moment.</p>
+                                 </div>
+                             )}
+                             {watchExperience === 'trailer' && trailerSources.length > 0 && (
+                                 <TrailerPlayer
+                                     title={`${selectedMovie?.title || currentRoom.movie?.title || 'Watch Party'} — Trailer`}
+                                     sources={trailerSources}
+                                     coverImage={getPosterSrc(selectedMovie || currentRoom.movie, 1280)}
+                                     onClose={() => setWatchExperience('movie')}
+                                 />
+                             )}
 
-                            {/* SERIES EPISODES SELECTOR DRAWER */}
+                             {/* SERIES EPISODES SELECTOR DRAWER */}
                             {(() => {
                                 const rawType = String(selectedMovie?.type || movieDetails?.type || currentRoom.movie?.type || '').toLowerCase();
                                 const isMovie = rawType === 'movie' || rawType.includes('feature');
